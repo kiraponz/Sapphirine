@@ -5,8 +5,10 @@
  * Everything Mednafen's core calls out to the driver for lives here: the MDFND_* hooks from
  * mednafen-driver.h and the other *-driver.h headers, and the entry points it would otherwise
  * pick up from netplay.cpp (which we do not build: it drags net/ in, and the frontend here only
- * needs its symbols to exist). Nothing here drives emulation; the frontend wiring comes in a
- * later task. Threading comes from Mednafen's own MThreading_POSIX.cpp.
+ * needs its symbols to exist). android_host.cpp has the driver side that does drive emulation
+ * (the frame loop, the surface); until audio and input arrive, MDFND_MidSync stays empty, so
+ * there is nothing to synchronize here anyway. Threading comes from Mednafen's own
+ * MThreading_POSIX.cpp.
  */
 
 #include <mednafen/mednafen.h>

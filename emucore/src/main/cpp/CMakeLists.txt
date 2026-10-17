@@ -247,8 +247,6 @@ set(MPCDEC_SOURCES
 	mpcdec/crc32.c
 )
 
-# Our files (frontend stubs + the JNI probe that forces the ss module into the link), then the
-# Mednafen sources, all under <core>/src.
 set(mednafen_sources
 	${MDN_ROOT_SOURCES}
 	${MDN_CDROM_SOURCES}
@@ -259,7 +257,10 @@ set(mednafen_sources
 )
 list(TRANSFORM mednafen_sources PREPEND "${CORE_DIR}/src/")
 
+# Our files (the frontend host, the driver stubs and the JNI boundary), then the Mednafen
+# sources, all under <core>/src.
 add_library(emucore SHARED
+	android_host.cpp
 	driver_stubs.cpp
 	jni.cpp
 	${mednafen_sources}
@@ -302,6 +303,7 @@ set_source_files_properties(${mpcdec_paths} PROPERTIES
 # Catch every missing symbol at link time instead of leaving it to a crash at runtime.
 target_link_options(emucore PRIVATE -Wl,--no-undefined)
 
-# Android's bundled zlib (png.cpp, GZFileStream.cpp, testsexp.cpp, ...) and libm; log for the
-# driver stubs' output. Threads are part of bionic.
-target_link_libraries(emucore PRIVATE log z m)
+# Android's bundled zlib (png.cpp, GZFileStream.cpp, testsexp.cpp, ...), libm, and libandroid
+# (ANativeWindow, in android_host.cpp / jni.cpp); log for the core's own output. Threads are
+# part of bionic.
+target_link_libraries(emucore PRIVATE log z m android)

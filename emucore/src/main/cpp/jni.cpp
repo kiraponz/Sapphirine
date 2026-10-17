@@ -1,25 +1,170 @@
-/* jni.cpp — the one JNI entry point for this task.
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
- *
- * Returning data taken from Mednafen's EmulatedSS (the Saturn module's MDFNGI descriptor)
- * forces the linker to pull the ss module in, which proves the whole ss module links cleanly.
- * Nothing calls this yet; NativeCore.kt gets its external functions in a later task.
- */
+// The JNI functions of com.kira3.ametrine.emucore.NativeCore, one per external of the Kotlin
+// object, plus JNI_OnLoad, which hands the JVM over to android_host (for the callbacks the
+// core makes into NativeCore).
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
 
+// types.h (through mednafen.h) #errors if it comes after jni.h (which android_host.h pulls in
+// and which defines NULL), so mednafen.h goes first. config.h through types.h provides
+// MEDNAFEN_VERSION.
 #include <mednafen/mednafen.h>
+#include "android_host.h"
 
-#include <mednafen/ss/ss.h>
+#include <android/log.h>
+#include <android/native_window_jni.h>
 
-// types.h (through mednafen.h) must come before common C headers like jni.h.
-#include <jni.h>
+#include <string>
 
-// EmulatedSS is defined at global scope in src/ss/ss.cpp. mednafen.cpp declares it the same
-// way, under #ifdef WANT_SS_EMU.
-extern const Mednafen::MDFNGI EmulatedSS;
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_kira3_ametrine_emucore_NativeCore_nativeLinkCheck(JNIEnv* env, jobject)
+namespace
 {
-	return env->NewStringUTF(EmulatedSS.fullname);
+
+std::string ToString(JNIEnv* env, jstring str)
+{
+	if (!str)
+		return {};
+
+	const char* chars = env->GetStringUTFChars(str, nullptr);
+	std::string ret(chars);
+	env->ReleaseStringUTFChars(str, chars);
+	return ret;
+}
+
+/** Null for no error. */
+jstring ErrorToString(JNIEnv* env, bool ok, const std::string& error)
+{
+	return ok ? nullptr : env->NewStringUTF(error.empty() ? "Unknown error" : error.c_str());
+}
+
+} // namespace
+
+#define NATIVE_CORE(name) Java_com_kira3_ametrine_emucore_NativeCore_##name
+
+extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved)
+{
+	(void)reserved;
+
+	JNIEnv* env;
+	if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK)
+		return JNI_ERR;
+
+	jclass native_core = env->FindClass("com/kira3/ametrine/emucore/NativeCore");
+	if (!native_core)
+		return JNI_ERR;
+
+	AndroidHost::SetJavaVM(vm, static_cast<jclass>(env->NewGlobalRef(native_core)));
+	env->DeleteLocalRef(native_core);
+	return JNI_VERSION_1_6;
+}
+
+// ---- Setup ----
+
+extern "C" JNIEXPORT jstring JNICALL NATIVE_CORE(initialize)(JNIEnv* env, jclass, jstring data_dir)
+{
+	std::string error;
+	const bool ok = AndroidHost::Initialize(ToString(env, data_dir), &error);
+	return ErrorToString(env, ok, error);
+}
+
+extern "C" JNIEXPORT jstring JNICALL NATIVE_CORE(getBuildVersion)(JNIEnv* env, jclass)
+{
+	return env->NewStringUTF(MEDNAFEN_VERSION);
+}
+
+// ---- Settings ----
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setSetting)(JNIEnv* env, jclass, jstring section, jstring key, jstring value)
+{
+	try
+	{
+		AndroidHost::SetSetting(ToString(env, section).c_str(), ToString(env, key).c_str(),
+			ToString(env, value).c_str());
+	}
+	catch (const std::exception& e)
+	{
+		__android_log_print(ANDROID_LOG_ERROR, "NativeCore", "setSetting: %s", e.what());
+	}
+}
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(commitSettings)(JNIEnv*, jclass)
+{
+	try
+	{
+		AndroidHost::CommitSettings();
+	}
+	catch (const std::exception& e)
+	{
+		__android_log_print(ANDROID_LOG_ERROR, "NativeCore", "commitSettings: %s", e.what());
+	}
+}
+
+// ---- Surface ----
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setSurface)(JNIEnv* env, jclass, jobject surface, jint width, jint height)
+{
+	// The reference the window gets here is the one SetWindow holds and releases when the
+	// surface is replaced or dropped.
+	ANativeWindow* window = surface ? ANativeWindow_fromSurface(env, surface) : nullptr;
+	AndroidHost::SetWindow(window, window ? (uint32_t)width : 0, window ? (uint32_t)height : 0);
+}
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setDisplayRefreshRate)(JNIEnv*, jclass, jfloat hz)
+{
+	AndroidHost::SetDisplayRefreshRate(hz);
+}
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setDisplayLayout)(JNIEnv*, jclass, jboolean portrait_top, jint top_margin)
+{
+	AndroidHost::SetDisplayLayout(portrait_top == JNI_TRUE, top_margin < 0 ? 0u : (uint32_t)top_margin);
+}
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setOsdSafeArea)(JNIEnv*, jclass, jint left, jint top, jint right, jint bottom)
+{
+	AndroidHost::SetOsdSafeArea(left < 0 ? 0u : (uint32_t)left, top < 0 ? 0u : (uint32_t)top,
+		right < 0 ? 0u : (uint32_t)right, bottom < 0 ? 0u : (uint32_t)bottom);
+}
+
+// ---- VM lifecycle ----
+
+extern "C" JNIEXPORT jstring JNICALL NATIVE_CORE(runSystem)(JNIEnv* env, jclass, jstring path, jstring save_state)
+{
+	std::string error;
+	try
+	{
+		const bool ok = AndroidHost::RunSystem(ToString(env, path), ToString(env, save_state), &error);
+		return ErrorToString(env, ok, error);
+	}
+	catch (const std::exception& e)
+	{
+		return env->NewStringUTF(e.what());
+	}
+}
+
+extern "C" JNIEXPORT jboolean JNICALL NATIVE_CORE(hasActiveSystem)(JNIEnv*, jclass)
+{
+	return AndroidHost::HasActiveSystem() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(pause)(JNIEnv*, jclass)
+{
+	AndroidHost::RequestPause(true);
+}
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(resume)(JNIEnv*, jclass)
+{
+	AndroidHost::RequestPause(false);
+}
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(shutdown)(JNIEnv*, jclass)
+{
+	AndroidHost::RequestShutdown();
+}
+
+extern "C" JNIEXPORT jfloat JNICALL NATIVE_CORE(getFps)(JNIEnv*, jclass)
+{
+	return AndroidHost::GetFps();
+}
+
+extern "C" JNIEXPORT jlong JNICALL NATIVE_CORE(getFrameNumber)(JNIEnv*, jclass)
+{
+	return AndroidHost::GetFrameNumber();
 }
