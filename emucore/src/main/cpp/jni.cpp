@@ -14,6 +14,8 @@
 #include <android/log.h>
 #include <android/native_window_jni.h>
 
+#include <unistd.h>
+
 #include <string>
 #include <vector>
 
@@ -223,4 +225,14 @@ extern "C" JNIEXPORT jboolean JNICALL NATIVE_CORE(switchDisc)(JNIEnv*, jclass, j
 extern "C" JNIEXPORT jboolean JNICALL NATIVE_CORE(insertDisc)(JNIEnv* env, jclass, jstring path)
 {
 	return AndroidHost::InsertDisc(ToString(env, path)) ? JNI_TRUE : JNI_FALSE;
+}
+
+// ---- BIOS ----
+
+extern "C" JNIEXPORT jstring JNICALL NATIVE_CORE(getBiosInfoFromFd)(JNIEnv* env, jclass, jint fd)
+{
+	// Takes ownership of the descriptor (NativeCore.getBiosInfoFromFd).
+	const std::string info = AndroidHost::GetBiosInfo(fd);
+	close(fd);
+	return info.empty() ? nullptr : env->NewStringUTF(info.c_str());
 }

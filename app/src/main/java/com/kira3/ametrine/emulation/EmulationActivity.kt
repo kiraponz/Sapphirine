@@ -317,6 +317,7 @@ class EmulationActivity : ComponentActivity() {
                             null
                         },
                     )
+                    if (settings?.osd?.showFps == true) FpsOverlay { core.fps }
                     if (serial != null && settings?.gemini?.memosVisible == true && memoList.isNotEmpty()) {
                         MemoOverlay(memoList, memoActions)
                     }

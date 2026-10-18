@@ -71,7 +71,7 @@ data class Game(
     /** Shown in the library: the core knows the disc, or the file isn't a disc at all. */
     val recognized: Boolean get() = !needsSerial || serial != null
 
-    /** The core has looked and found no PS1 disc: a BIOS, a PS2 image or some other file. Kept under its own heading. */
+    /** The core has looked and found no Saturn disc: a BIOS, another system's image or some other file. Kept under its own heading. */
     val unrecognized: Boolean get() = needsSerial && serialRead && serial == null
 
     private companion object {

@@ -1,6 +1,7 @@
 package com.kira3.ametrine.ui.memcards
 
 import android.text.format.DateFormat
+import android.text.format.DateUtils
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -96,7 +97,7 @@ fun MemoryCardSavesScreen(
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
         topBar = {
             LargeFlexibleTopAppBar(
-                title = { Text(cardName, maxLines = 1) },
+                title = { Text(state.card?.label ?: cardName, maxLines = 1) },
                 navigationIcon = { if (!twoPane) BackButton(onBack) },
                 actions = {
                     if (saves.isNotEmpty()) {
@@ -208,7 +209,7 @@ fun MemoryCardSavesScreen(
     state.conflict?.let { conflict ->
         AlertDialog(
             onDismissRequest = viewModel::dismissConflict,
-            title = { Text(stringResource(R.string.memcards_replace_title, conflict.target.name)) },
+            title = { Text(stringResource(R.string.memcards_replace_title, conflict.target.label)) },
             text = {
                 Text(pluralStringResource(R.plurals.memcards_replace_text, conflict.existing.size, conflict.existing.size))
             },
@@ -249,7 +250,7 @@ fun MemoryCardSavesScreen(
 private fun summary(card: MemoryCard?, listing: com.kira3.ametrine.data.SaveListing?): String {
     if (card == null) return stringResource(R.string.memcards_gone)
     return when (listing?.state) {
-        CardState.Formatted -> stringResource(R.string.memcards_free_of, listing.freeKilobytes / 8, listing.capacityKilobytes / 8)
+        CardState.Formatted -> stringResource(R.string.memcards_free_of, listing.freeBlocks, listing.capacityBlocks)
         CardState.Unsupported -> stringResource(R.string.memcards_not_formatted)
         null -> ""
     }
@@ -259,7 +260,8 @@ private fun summary(card: MemoryCard?, listing: com.kira3.ametrine.data.SaveList
 private fun SaveInfo.details(): String {
     val parts = listOfNotNull(
         if (title != null) name else null,
-        pluralStringResource(R.plurals.memcards_save_blocks, kilobytes / 8, kilobytes / 8),
+        pluralStringResource(R.plurals.memcards_save_blocks, blocks, blocks),
+        date?.let { DateUtils.formatDateTime(LocalContext.current, it, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME) },
     )
     return parts.joinToString(" · ")
 }
@@ -278,7 +280,7 @@ private fun TargetDialog(move: Boolean, others: List<MemoryCard>, onPick: (Memor
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(selected = selected?.name == card.name, onClick = { selected = card })
-                        Text(card.name, maxLines = 1)
+                        Text(card.label, maxLines = 1)
                     }
                 }
             }

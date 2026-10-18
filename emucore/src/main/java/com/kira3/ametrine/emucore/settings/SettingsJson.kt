@@ -13,8 +13,8 @@ import kotlinx.serialization.json.jsonObject
  * JSON form of [EmulatorSettings] and of per-game overrides.
  *
  * Reading never fails on a stored file: unknown keys are dropped, and a value of the wrong
- * type (or a missing one) falls back to the default, so a renamed or retyped field costs
- * only that one value.
+ * type, a choice value that is not one of [choices] (or a missing value) falls back to the
+ * default, so a renamed or retyped field costs only that one value.
  */
 object SettingsJson {
     private val json = Json {
@@ -24,6 +24,19 @@ object SettingsJson {
     }
 
     private val defaults: JsonObject by lazy { encode(EmulatorSettings()) }
+
+    /**
+     * The values each choice setting can take. A stored value outside them, such as one an
+     * older version of the app wrote for a setting of the same name, reads as the default.
+     */
+    private val choices: Map<String, Set<String>> = mapOf(
+        "console.region" to setOf("auto", "jp", "na", "eu"),
+        "console.cart" to setOf("auto", "none", "backup", "extram1", "extram4"),
+        "console.language" to setOf("english", "german", "french", "spanish", "italian", "japanese"),
+        "display.aspectRatio" to setOf("4:3", "16:9", "Stretch"),
+        "display.deinterlacer" to setOf("weave", "bob", "bob_offset", "blend"),
+        "system.backupRam" to setOf("PerGame", "Shared"),
+    )
 
     fun encode(settings: EmulatorSettings): JsonObject = json.encodeToJsonElement(settings).jsonObject
 
@@ -56,14 +69,15 @@ object SettingsJson {
         overlay(encode(settings), JsonObject(emptyMap()).withValue(path.split('.'), value))
 
     private fun overlay(base: JsonObject, top: JsonObject): EmulatorSettings =
-        json.decodeFromJsonElement(overlayJson(base, top))
+        json.decodeFromJsonElement(overlayJson(base, top, ""))
 
-    private fun overlayJson(base: JsonObject, top: JsonObject): JsonObject =
+    private fun overlayJson(base: JsonObject, top: JsonObject, prefix: String): JsonObject =
         JsonObject(base.mapValues { (key, value) ->
             val over = top[key] ?: return@mapValues value
             when {
-                value is JsonObject && over is JsonObject -> overlayJson(value, over)
-                value is JsonPrimitive && over is JsonPrimitive && sameKind(value, over) -> over
+                value is JsonObject && over is JsonObject -> overlayJson(value, over, "$prefix$key.")
+                value is JsonPrimitive && over is JsonPrimitive && sameKind(value, over) &&
+                    choices[prefix + key]?.contains(over.content) != false -> over
                 else -> value
             }
         })

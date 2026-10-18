@@ -41,7 +41,7 @@ class EmulatorCore(context: Context) {
      */
     val biosDir: File = File(dataDir, "bios")
 
-    /** Where the core keeps its memory cards (128 KB `.mcd` files). */
+    /** Where the core keeps its backup memory (Mednafen's save folder: `.bkr`, `.bcr` and `.smpc` files). */
     val memoryCardsDir: File = File(dataDir, "memcards")
 
     /** The save states (`<serial>_<slot>.sav`) and the suspend states (`<serial>_resume.sav`). */
@@ -188,7 +188,7 @@ class EmulatorCore(context: Context) {
     // ---- BIOS and games ----
 
     /**
-     * Reads BIOS metadata from [uri], or null if it is not a 512 KB PS1 BIOS. A BIOS the core's
+     * Reads BIOS metadata from [uri], or null if it is not a 512 KB Saturn BIOS. A BIOS the core's
      * list does not know has [BiosRegion.Unknown]. Blocking I/O.
      */
     fun readBiosMetadata(uri: Uri): BiosMetadata? {
@@ -196,8 +196,7 @@ class EmulatorCore(context: Context) {
         val info = NativeCore.getBiosInfoFromFd(fd) ?: return null
         val region = when (info.substringBefore('\t').toIntOrNull()) {
             1 -> BiosRegion.Japan
-            2 -> BiosRegion.Usa
-            3 -> BiosRegion.Europe
+            2 -> BiosRegion.NorthAmericaEurope
             else -> BiosRegion.Unknown
         }
         return BiosMetadata(region = region, description = info.substringAfter('\t'))

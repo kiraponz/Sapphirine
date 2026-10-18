@@ -7,26 +7,26 @@ class SettingsValuesTest {
     @Test
     fun readsEachType() {
         val values = SettingsValues(EmulatorSettings())
-        assertEquals(false, values["gpu.pgxpEnable"])
-        assertEquals(1, values["gpu.resolutionScale"])
-        assertEquals("auto", values["gpu.renderer"])
+        assertEquals(false, values["display.hBlend"])
+        assertEquals(4, values["audio.resampleQuality"])
+        assertEquals("auto", values["console.region"])
     }
 
     @Test
     fun writesByPath() {
         val values = SettingsValues(EmulatorSettings())
-        assertEquals(true, values.with("gpu.pgxpEnable", true).gpu.pgxpEnable)
-        assertEquals(3, values.with("gpu.resolutionScale", 3).gpu.resolutionScale)
-        assertEquals("vulkan", values.with("gpu.renderer", "vulkan").gpu.renderer)
+        assertEquals(true, values.with("display.hBlend", true).display.hBlend)
+        assertEquals(8, values.with("audio.resampleQuality", 8).audio.resampleQuality)
+        assertEquals("jp", values.with("console.region", "jp").console.region)
     }
 
     @Test
     fun wrongTypeIsIgnored() {
-        assertEquals(EmulatorSettings(), SettingsValues(EmulatorSettings()).with("gpu.resolutionScale", "fast"))
+        assertEquals(EmulatorSettings(), SettingsValues(EmulatorSettings()).with("audio.resampleQuality", "fast"))
     }
 
     @Test(expected = Exception::class)
     fun unknownPathThrows() {
-        SettingsValues(EmulatorSettings())["gpu.nope"]
+        SettingsValues(EmulatorSettings())["display.nope"]
     }
 }

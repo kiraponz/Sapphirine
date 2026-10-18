@@ -31,7 +31,7 @@ class BiosRepository(
     /** An installed BIOS, or null while there is none and no game can start. */
     val available: Flow<Bios?> = changes.map { installed().firstOrNull() }
 
-    /** Copies the BIOS at [uri] into the BIOS folder. Returns null if the file is not a PS1 BIOS. */
+    /** Copies the BIOS at [uri] into the BIOS folder. Returns null if the file is not a Saturn BIOS. */
     suspend fun import(uri: Uri): Bios? = withContext(Dispatchers.IO) {
         core.initialize()
         val metadata = core.readBiosMetadata(uri) ?: return@withContext null

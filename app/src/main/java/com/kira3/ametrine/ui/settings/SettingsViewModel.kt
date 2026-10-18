@@ -35,7 +35,7 @@ data class SettingsUiState(
     val overrides: Set<String>,
     /** Installed BIOS files, for a game's BIOS choice. */
     val bioses: List<Bios>,
-    /** The memory cards the app holds, for the slots' choices. */
+    /** The backup memory files the app holds, for the shared file's choices. */
     val cards: List<MemoryCard>,
     /** Installed custom Vulkan drivers. */
     val drivers: List<GpuDriver>,

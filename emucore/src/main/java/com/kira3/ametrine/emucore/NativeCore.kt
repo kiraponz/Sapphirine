@@ -1,6 +1,5 @@
 package com.kira3.ametrine.emucore
 
-import android.os.ParcelFileDescriptor
 import android.util.Log
 import android.view.Surface
 
@@ -166,16 +165,11 @@ internal object NativeCore {
     @JvmStatic fun getGameDbTitle(serial: String): String? = null
 
     /**
-     * "<region>\t<description>" for a BIOS image, or null. The region is 1 NTSC-J, 2 NTSC-U,
-     * 3 PAL, or -1 for an image the core does not know. Takes ownership of [fd].
-     *
-     * The stub takes any file as a BIOS it does not know. Reading it from the core comes with
-     * the BIOS identification task; for now the app accepts the file as is.
+     * "<region>\t<description>" for a Saturn BIOS image, or null if it is none. The region is
+     * 1 Japan, 2 North America and Europe, or -1 for an image the core does not know; the
+     * description is the image's usual file name ("sega_101.bin"). Takes ownership of [fd].
      */
-    @JvmStatic fun getBiosInfoFromFd(fd: Int): String? {
-        ParcelFileDescriptor.adoptFd(fd).close()
-        return "-1\tStub BIOS"
-    }
+    @JvmStatic external fun getBiosInfoFromFd(fd: Int): String?
 
     // ---- Called from native ----
     // These run on core threads; nothing may throw out of them.

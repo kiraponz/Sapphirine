@@ -17,6 +17,7 @@
 
 #include "android_host.h"
 #include "audio_stream.h"
+#include "bios.h"
 #include "disc.h"
 
 #include <android/log.h>
@@ -53,9 +54,6 @@ constexpr const char* LOG_TAG = "emucore";
 // (src/ss/vdp2_render.cpp, VDP2REND_SetGetVideoParams). One surface covers both.
 constexpr int FB_WIDTH = 704;
 constexpr int FB_HEIGHT_CAP = 576;
-
-// Bytes in a Saturn BIOS ROM image, for picking an unnamed one out of the BIOS folder.
-constexpr off_t BIOS_SIZE = 524288;
 
 // ---------------------------------------------------------------------------
 // JVM callbacks (the Kotlin NativeCore), set up in JNI_OnLoad.
@@ -115,6 +113,15 @@ ANativeWindow* s_window = nullptr;
 // The placement of the picture (SetDisplayLayout), under the same mutex, since the draw uses it.
 bool s_portrait_top = true;
 uint32_t s_top_margin = 0;
+
+// The picture's shape on the window (SetSetting "Display"/AspectRatio; CoreKeys.kt).
+enum class AspectRatio
+{
+	Standard,	// 4:3, the TV's
+	Wide,		// 16:9, for games that draw squeezed for wide TVs
+	Stretch,	// the whole window
+};
+std::atomic<AspectRatio> s_aspect_ratio{AspectRatio::Standard};
 // The window the pixel format was last forced on, so that happens once per surface.
 ANativeWindow* s_geometry_window = nullptr;
 
@@ -142,9 +149,13 @@ std::atomic<int32_t> s_fast_forward_volume_percent{100};
 std::atomic<bool> s_output_muted{false};
 std::atomic<int32_t> s_buffer_ms{100};
 
-// True while the VM runs without pacing (NativeCore.setFastForward, from
-// EmulatorCore.setFastForward); the frame loop reads it at every frame.
+// True while the VM runs fast (NativeCore.setFastForward, from EmulatorCore.setFastForward);
+// the frame loop reads it at every frame.
 std::atomic<bool> s_fast_forward{false};
+
+// How fast fast-forward runs, as a multiple of full speed (SetSetting "Main"/FastForwardSpeed,
+// 2..10), or 0 for as fast as the device goes.
+std::atomic<int32_t> s_fast_forward_speed{0};
 
 // The once-per-boots audio output, created in RunSystem and closed at the teardown (or the
 // moment its stream is beyond saving). Producer side (push) is the CPU thread.
@@ -327,19 +338,57 @@ std::vector<Mednafen::CDInterface*> s_cd_interfaces;
 // The app's data directory (Initialize), and with it the BIOS folder the core reads.
 std::string s_data_dir;
 
-// The BIOS path keys the app sent (SetSetting, section "BIOS"). The core reads them back on the
-// next boot, when they turn into absolute paths. A running VM does not see them, which matches
-// how the app treats BIOS changes (appliesOnNextBoot).
+// The settings the app sent, kept for the boot and for the CPU thread (s_settings_mutex):
+// the BIOS path keys (section "BIOS"), and Mednafen's own settings (section "Core", keyed by
+// their Mednafen names; CoreKeys.kt). A boot writes all of them into Mednafen; while a game
+// runs, only LIVE_CORE_SETTINGS reach it (at the next frame, after a CommitSettings), which
+// matches what the app applies at once (SettingsEffects.appliesOnNextBoot has the rest).
 std::mutex s_settings_mutex;
 std::map<std::string, std::string> s_bios_settings;
+std::map<std::string, std::string> s_core_settings;
+std::atomic<bool> s_live_settings_pending{false};
+
+// The Mednafen settings that take effect in a running game: the resampler is read at every
+// frame, and the deinterlacer is rebuilt by its change callback.
+constexpr const char* LIVE_CORE_SETTINGS[] = { "ss.scsp.resamp_quality", "video.deinterlacer" };
+
+// Writes the app's Mednafen settings into Mednafen: all of them, or with [live_only] those that
+// reach a running game. A value Mednafen rejects is logged and skipped, so one bad value does
+// not stop the boot.
+void apply_core_settings(bool live_only)
+{
+	std::map<std::string, std::string> values;
+	{
+		std::lock_guard<std::mutex> lock(s_settings_mutex);
+		values = s_core_settings;
+	}
+
+	for (const auto& [name, value] : values)
+	{
+		if (live_only && std::none_of(std::begin(LIVE_CORE_SETTINGS), std::end(LIVE_CORE_SETTINGS),
+				[&](const char* live) { return name == live; }))
+			continue;
+
+		try
+		{
+			if (!Mednafen::MDFNI_SetSetting(name.c_str(), value.c_str(), false))
+				__android_log_print(ANDROID_LOG_WARN, LOG_TAG, "Setting %s=%s was not taken", name.c_str(), value.c_str());
+		}
+		catch (const std::exception& e)
+		{
+			__android_log_print(ANDROID_LOG_WARN, LOG_TAG, "Setting %s=%s: %s", name.c_str(), value.c_str(), e.what());
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
-// BIOS paths: find_bios_file / resolve_bios_path / apply_bios_settings.
+// BIOS paths: pick_bios_file / resolve_bios_path / apply_bios_settings.
 // ---------------------------------------------------------------------------
 
-// The name of the first regular file of exactly BIOS_SIZE bytes in the folder at [dir] (sorted
-// by name), or "" when there is none.
-std::string find_bios_file(const std::string& dir)
+// The BIOS file in the folder at [dir] for [region]: the first (by name) that is known to be
+// that region's, else the first that is not known at all, else the first BIOS-sized file of
+// any region, so a game still gets to try the BIOS there is. "" when there is none.
+std::string pick_bios_file(const std::string& dir, AndroidHost::BiosRegion region)
 {
 	DIR* dp = opendir(dir.c_str());
 	if (!dp)
@@ -353,41 +402,48 @@ std::string find_bios_file(const std::string& dir)
 
 	std::sort(names.begin(), names.end());
 
-	std::string ret;
+	std::string unknown, other;
 	for (const std::string& name : names)
 	{
 		if (name == "." || name == "..")
 			continue;
 
 		const std::string path = dir + "/" + name;
-		struct stat st;
-		if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size == BIOS_SIZE)
+		AndroidHost::BiosInfo info;
+		if (!AndroidHost::IdentifyBiosFile(path, &info))
+			continue;
+
+		if (info.region == region)
+			return path;
+		if (info.region == AndroidHost::BiosRegion::Unknown)
 		{
-			ret = path;
-			break;
+			if (unknown.empty())
+				unknown = path;
 		}
+		else if (other.empty())
+			other = path;
 	}
 
-	return ret;
+	return unknown.size() ? unknown : other;
 }
 
 // The absolute BIOS path the app's value [name] means: a file of the BIOS folder under the
-// app's data directory, with "" meaning "the first BIOS-sized file there". Values that point
-// out of the folder are not supported: the app copies a picked BIOS in (EmulatorCore.biosDir,
-// anyway), and MDFN_MakeFName(MDFNMKF_FIRMWARE, ...) puts absolute paths through unchanged.
-std::string resolve_bios_path(const std::string& name)
+// app's data directory, with "" meaning "the best one there for [region]" (pick_bios_file).
+// Values that point out of the folder are not supported: the app copies a picked BIOS in
+// (EmulatorCore.biosDir), and MDFN_MakeFName(MDFNMKF_FIRMWARE, ...) puts absolute paths
+// through unchanged.
+std::string resolve_bios_path(const std::string& name, AndroidHost::BiosRegion region)
 {
 	if (name.size())
 		return s_data_dir + "/bios/" + name;
 
-	return find_bios_file(s_data_dir + "/bios");
+	return pick_bios_file(s_data_dir + "/bios", region);
 }
 
 // Writes the app's BIOS picks into Mednafen: BIOS/PathNTSCJ feeds ss.bios_jp, and
-// BIOS/PathNTSCU (falling back to BIOS/PathPAL) feeds ss.bios_na_eu. An empty value means "let
-// the emulator choose": the first BIOS-sized file in the BIOS folder (sorted by name). When the
-// folder has no usable file, the setting keeps Mednafen's default and the boot fails on the
-// missing BIOS file with the module's own error.
+// BIOS/PathNTSCU (falling back to BIOS/PathPAL) feeds ss.bios_na_eu. An empty value lets the
+// emulator choose a file for the region. When the folder has no usable file, the setting keeps
+// Mednafen's default and the boot fails on the missing BIOS file with the module's own error.
 void apply_bios_settings()
 {
 	std::map<std::string, std::string> values;
@@ -396,20 +452,20 @@ void apply_bios_settings()
 		values = s_bios_settings;
 	}
 
-	// Both region keys empty is fine: one file then serves both regions.
-	const std::string jp_path = resolve_bios_path(values["PathNTSCJ"]);
+	const std::string jp_path = resolve_bios_path(values["PathNTSCJ"], AndroidHost::BiosRegion::Japan);
 	const std::string na_eu_path = resolve_bios_path(
-		values["PathNTSCU"].empty() ? values["PathPAL"] : values["PathNTSCU"]);
+		values["PathNTSCU"].empty() ? values["PathPAL"] : values["PathNTSCU"],
+		AndroidHost::BiosRegion::NorthAmericaEurope);
 
 	if (jp_path.size())
 		Mednafen::MDFNI_SetSetting("ss.bios_jp", jp_path.c_str(), false);
 	if (na_eu_path.size())
 		Mednafen::MDFNI_SetSetting("ss.bios_na_eu", na_eu_path.c_str(), false);
 
-	// Region handling and BIOS identification are later tasks: the Japanese region for now,
-	// and the ROM-image sanity checks off, so any 512 KiB file boots.
+	// The module's checks refuse a BIOS of the other region, and any file named like a known
+	// image without being it. The app lets a game's settings pick any BIOS (and falls back to
+	// one of another region when that is all there is), so they stay off.
 	Mednafen::MDFNI_SetSetting("ss.bios_sanity", "0", false);
-	Mednafen::MDFNI_SetSetting("ss.region_default", "jp", false);
 }
 
 // ---------------------------------------------------------------------------
@@ -546,13 +602,29 @@ void sleep_until_ns(int64_t deadline)
 // under the game surface.
 constexpr uint32_t OPAQUE_BLACK = 0xFF000000u;
 
-// The placement of the 4:3 picture on a window [width]x[height]: the largest 4:3 rectangle
-// that fits, centered — or at the top of a portrait window, [top_margin] pixels down, as
-// SetDisplayLayout says. Under s_window_mutex (it reads the layout).
+// The placement of the picture on a window [width]x[height]: the largest rectangle of the
+// aspect ratio setting's shape that fits (the whole window for Stretch), centered — or at the
+// top of a portrait window, [top_margin] pixels down, as SetDisplayLayout says. Under
+// s_window_mutex (it reads the layout).
 void picture_rect(int width, int height, int* x, int* y, int* w, int* h)
 {
-	*w = std::min(width, height * 4 / 3);
-	*h = *w * 3 / 4;
+	switch (s_aspect_ratio.load(std::memory_order_relaxed))
+	{
+		case AspectRatio::Stretch:
+			*w = width;
+			*h = height;
+			break;
+
+		case AspectRatio::Wide:
+			*w = std::min(width, height * 16 / 9);
+			*h = *w * 9 / 16;
+			break;
+
+		default:
+			*w = std::min(width, height * 4 / 3);
+			*h = *w * 3 / 4;
+			break;
+	}
 	*x = (width - *w) / 2;
 	*y = (s_portrait_top && height > width) ? std::min<int>((int)s_top_margin, height - *h)
 						: (height - *h) / 2;
@@ -631,8 +703,8 @@ void draw_frame()
 	int x, y, w, h;
 	picture_rect(buffer.width, buffer.height, &x, &y, &w, &h);
 
-	// Whatever the frame does not reach (the letterbox around the 4:3 picture) turns opaque
-	// black first.
+	// Whatever the frame does not reach (the letterbox around the picture) turns opaque black
+	// first.
 	uint32_t* pix = reinterpret_cast<uint32_t*>(buffer.bits);
 	std::fill(pix, pix + (size_t)buffer.stride * buffer.height, OPAQUE_BLACK);
 
@@ -814,11 +886,6 @@ void load_bios_only()
 	// a successful LoadCD).
 	try
 	{
-		// The module builds its deinterlacer through the setting's change callback, which
-		// only runs once a game is loaded (settings.cpp Set()); putting the setting into
-		// place now creates it. "weave" is Mednafen's default.
-		Mednafen::MDFNI_SetSetting("video.deinterlacer", "weave", false);
-
 		// The drive after load, as the disc changer would leave it for "no disc": tray open,
 		// nothing in it. (CDB_SetDisc's tray_open matches drive state 0.)
 		MDFN_IEN_SS::CDB_SetDisc(true, nullptr);
@@ -840,6 +907,30 @@ void load_bios_only()
 		Mednafen::MDFNI_CloseGame();
 		throw;
 	}
+}
+
+// Moves the files of the folder Mednafen saved to before (its default "sav") into [to], where
+// none of the same name is, and removes the folder once it is empty.
+void move_old_saves(const std::string& from, const std::string& to)
+{
+	DIR* dp = opendir(from.c_str());
+	if (!dp)
+		return;
+
+	struct dirent* de;
+	while ((de = readdir(dp)))
+	{
+		const std::string name = de->d_name;
+		if (name == "." || name == "..")
+			continue;
+
+		const std::string target = to + "/" + name;
+		struct stat st;
+		if (stat(target.c_str(), &st) != 0)
+			rename((from + "/" + name).c_str(), target.c_str());
+	}
+	closedir(dp);
+	rmdir(from.c_str());
 }
 
 } // namespace
@@ -878,7 +969,7 @@ bool Initialize(const std::string& data_dir, std::string* error)
 		// backup memory, the save states, the cheats. Make them ahead, so the writes at a
 		// (future) close succeed.
 		mkdir((data_dir + "/mednafen").c_str(), 0755);
-		mkdir((data_dir + "/mednafen/sav").c_str(), 0755);
+		mkdir((data_dir + "/memcards").c_str(), 0755);
 		mkdir((data_dir + "/mednafen/mcs").c_str(), 0755);
 		mkdir((data_dir + "/mednafen/mcm").c_str(), 0755);
 		mkdir((data_dir + "/mednafen/cheats").c_str(), 0755);
@@ -887,6 +978,11 @@ bool Initialize(const std::string& data_dir, std::string* error)
 			throw std::runtime_error("Mednafen initialization failed");
 		if (!Mednafen::MDFNI_InitFinalize((data_dir + "/mednafen").c_str()))
 			throw std::runtime_error("Mednafen initialization failed");
+
+		// The backup memory (.bkr, the console's; .bcr, a backup cart's) and the clock (.smpc)
+		// go to the folder the app lists as memory cards (MemoryCardRepository).
+		Mednafen::MDFNI_SetSetting("filesys.path_sav", (data_dir + "/memcards").c_str(), false);
+		move_old_saves(data_dir + "/mednafen/sav", data_dir + "/memcards");
 	}
 	catch (const std::exception& e)
 	{
@@ -923,6 +1019,7 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		if (!Mednafen::MDFNSystems.size())
 			throw std::runtime_error("The core has not been initialized");
 
+		apply_core_settings(false);
 		apply_bios_settings();
 
 		if (path.size())
@@ -936,6 +1033,12 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		// it): without this the first Emulate crashes in SMPC_UpdateInput. See the Input
 		// ports section.
 		connect_input_devices();
+
+		// The module builds its deinterlacer through the setting's change callback, which
+		// only runs once a game is loaded (settings.cpp Set()); setting the live settings
+		// again now creates it.
+		s_live_settings_pending.store(false);
+		apply_core_settings(true);
 
 		// -------------------------------------------------------------
 		// The frame loop, on this thread: pause-aware, paced to the frame
@@ -1042,6 +1145,9 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 			s_espec.SoundBufSize_DriverProcessed = 0;
 			s_espec.MasterCycles_DriverProcessed = 0;
 
+			if (s_live_settings_pending.exchange(false))
+				apply_core_settings(true);
+
 			update_pad_buffers();
 			step_disc_change();
 
@@ -1061,15 +1167,17 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 			// Pace against an absolute deadline, so a late frame does not push the next one.
 			// If a whole frame or more was lost (a surface swap, a hiccup), jump the deadline
 			// instead of running a burst of frames with no sleep to catch up. Fast-forward
-			// does not sleep at all; the ring drops what does not fit.
+			// paces to its multiple of the frame rate, or does not sleep at all at speed 0;
+			// the ring drops what does not fit.
+			const int32_t ff_speed = s_fast_forward_speed.load(std::memory_order_relaxed);
 			const double drc = fast_forward ? 1.0 : drc_factor();
 			s_drc_scale.store((int64_t)(drc * 65536.0), std::memory_order_relaxed);
 			const int64_t now = now_ns();
-			if (fast_forward)
+			if (fast_forward && ff_speed <= 1)
 				deadline = now;
 			else
 			{
-				deadline += (int64_t)(frame_ns * drc);
+				deadline += fast_forward ? frame_ns / ff_speed : (int64_t)(frame_ns * drc);
 				if (deadline - now < -frame_ns)
 					deadline = now + frame_ns;
 				else
@@ -1197,8 +1305,31 @@ void SetFastForward(bool enabled)
 
 void SetSetting(const char* section, const char* key, const char* value)
 {
-	// The app sends PS1-era keys that the Saturn core has no use for; only the BIOS paths and
-	// the Audio section's volumes and buffer size mean anything now.
+	if (!strcmp(section, "Core"))
+	{
+		std::lock_guard<std::mutex> lock(s_settings_mutex);
+		s_core_settings[key] = value;
+		return;
+	}
+
+	if (!strcmp(section, "Display"))
+	{
+		if (!strcmp(key, "AspectRatio"))
+		{
+			s_aspect_ratio.store(!strcmp(value, "16:9") ? AspectRatio::Wide
+				: !strcmp(value, "Stretch") ? AspectRatio::Stretch : AspectRatio::Standard,
+				std::memory_order_relaxed);
+		}
+		return;
+	}
+
+	if (!strcmp(section, "Main"))
+	{
+		if (!strcmp(key, "FastForwardSpeed"))
+			s_fast_forward_speed.store(std::clamp(atoi(value), 0, 10), std::memory_order_relaxed);
+		return;
+	}
+
 	if (!strcmp(section, "Audio"))
 	{
 		if (!strcmp(key, "OutputVolume"))
@@ -1221,8 +1352,10 @@ void SetSetting(const char* section, const char* key, const char* value)
 
 void CommitSettings()
 {
-	// Nothing but the BIOS paths (SetSetting) can reach a running VM right now, and those wait
-	// for the next boot by design.
+	// The CPU thread writes the live Mednafen settings at its next frame (Mednafen's settings
+	// belong to it while a game runs). The BIOS paths and the other Mednafen settings wait
+	// for the next boot by design; the rest of SetSetting applies at once.
+	s_live_settings_pending.store(true);
 }
 
 void SetWindow(ANativeWindow* window, uint32_t width, uint32_t height)
@@ -1268,6 +1401,15 @@ void SetOsdSafeArea(uint32_t left, uint32_t top, uint32_t right, uint32_t bottom
 	(void)top;
 	(void)right;
 	(void)bottom;
+}
+
+std::string GetBiosInfo(int fd)
+{
+	BiosInfo info;
+	if (!IdentifyBios(fd, &info))
+		return "";
+
+	return std::to_string((int)info.region) + "\t" + (info.name.size() ? info.name : "Unknown BIOS");
 }
 
 // The SAF callbacks clear any exception the Kotlin side let through (it catches everything) and

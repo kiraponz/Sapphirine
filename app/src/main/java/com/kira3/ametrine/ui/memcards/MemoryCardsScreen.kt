@@ -177,7 +177,7 @@ fun MemoryCardsScreen(
                     },
                     supportingContent = { Text(card.details()) },
                 ) {
-                    Text(card.name, maxLines = 1)
+                    Text(card.label, maxLines = 1)
                 }
             }
             item(key = "about") {
@@ -219,7 +219,7 @@ fun MemoryCardsScreen(
     formatting?.let { card ->
         AlertDialog(
             onDismissRequest = { formatting = null },
-            title = { Text(stringResource(R.string.memcards_format_title, card.name)) },
+            title = { Text(stringResource(R.string.memcards_format_title, card.label)) },
             text = { Text(stringResource(R.string.memcards_format_text)) },
             confirmButton = {
                 TextButton(onClick = {
@@ -235,7 +235,7 @@ fun MemoryCardsScreen(
     deleting?.let { card ->
         AlertDialog(
             onDismissRequest = { deleting = null },
-            title = { Text(stringResource(R.string.memcards_delete_title, card.name)) },
+            title = { Text(stringResource(R.string.memcards_delete_title, card.label)) },
             text = { Text(stringResource(R.string.memcards_delete_text)) },
             confirmButton = {
                 TextButton(onClick = {

@@ -2,17 +2,12 @@ package com.kira3.ametrine.data
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.Rect
 import android.net.Uri
-import android.util.Log
 import android.provider.OpenableColumns
 import com.kira3.ametrine.data.memcard.CardState
-import com.kira3.ametrine.data.memcard.Ps1Card
+import com.kira3.ametrine.data.memcard.SaturnBackupRam
 import com.kira3.ametrine.data.memcard.SaveInfo
 import com.kira3.ametrine.data.memcard.WriteResult
-import com.kira3.ametrine.data.memcard.serialOfSave
 import com.kira3.ametrine.emucore.EmulatorCore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -21,14 +16,22 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** A PS1 memory card file (128 KB) in the core's card folder. */
+/**
+ * A backup memory file in the core's card folder: the console's (.bkr, 32 KB) or a backup
+ * memory cart's (.bcr). [label] is its name without the disc hash Mednafen puts in a game's
+ * own file ("Game.0123….bkr" is "Game.bkr").
+ */
 data class MemoryCard(
     val name: String,
     val bytes: Long,
     val modified: Long,
-)
+) {
+    val label: String get() = name.replace(GAME_HASH, ".")
+}
 
-/** A save that has an icon; [cardName] is the card it is on. */
+private val GAME_HASH = Regex("\\.[0-9a-f]{32}\\.")
+
+/** A save that has an icon; [cardName] is the card it is on. Saturn saves have none. */
 class SaveIconChoice(val cardName: String, val saveName: String, val title: String?, val icon: Bitmap)
 
 enum class MemoryCardResult { Ok, Exists, Invalid, Failed, Full, Busy }
@@ -37,14 +40,15 @@ enum class MemoryCardResult { Ok, Exists, Invalid, Failed, Full, Busy }
 class SaveListing(
     val state: CardState,
     val saves: List<SaveInfo>,
-    val freeKilobytes: Int,
-    val capacityKilobytes: Int,
+    val freeBlocks: Int,
+    val capacityBlocks: Int,
 )
 
 /**
- * The cards the core reads and writes in `<dataDir>/memcards`. The core picks a card by file name
- * (a game's own card is named after its title, the shared one is set in the settings), so these
- * are plain files that the app lists, creates, copies in and out, renames and deletes.
+ * The backup memory files the core reads and writes in `<dataDir>/memcards` (Mednafen's save
+ * folder). The core picks a file by name (a game's own is named after its disc file, the shared
+ * one is set in the settings), so these are plain files that the app lists, creates, copies in
+ * and out, renames and deletes. The app calls them memory cards, as the rest of it does.
  */
 class MemoryCardRepository(
     context: Context,
@@ -69,7 +73,7 @@ class MemoryCardRepository(
         val file = File(core.memoryCardsDir, cardName)
         if (file.exists()) return@withContext MemoryCardResult.Exists
         core.memoryCardsDir.mkdirs()
-        val ok = runCatching { Ps1Card.formatted().save(file) }.isSuccess
+        val ok = runCatching { SaturnBackupRam.formatted().save(file) }.isSuccess
         changed()
         if (ok) MemoryCardResult.Ok else MemoryCardResult.Failed
     }
@@ -95,7 +99,11 @@ class MemoryCardRepository(
     /** Erases every save on [card] and leaves it formatted. */
     suspend fun format(card: MemoryCard): MemoryCardResult = withContext(Dispatchers.IO) {
         if (gameRunning()) return@withContext MemoryCardResult.Busy
-        val ok = runCatching { replace(File(core.memoryCardsDir, card.name), Ps1Card.formatted()) }.getOrDefault(false)
+        val ok = runCatching {
+            val c = open(card) ?: SaturnBackupRam.formatted()
+            c.format()
+            replace(File(core.memoryCardsDir, card.name), c)
+        }.getOrDefault(false)
         changed()
         if (ok) MemoryCardResult.Ok else MemoryCardResult.Failed
     }
@@ -114,7 +122,7 @@ class MemoryCardRepository(
 
     /**
      * Copies the card file at [uri] into the card folder under its own name, or the next free
-     * one. Invalid if it is not a 128 KB PS1 card.
+     * one. Invalid if it is not a Saturn backup memory (.bkr) or backup cart (.bcr).
      */
     suspend fun import(uri: Uri): MemoryCardResult = withContext(Dispatchers.IO) {
         val fileName = displayName(uri)?.let(::sanitize) ?: return@withContext MemoryCardResult.Invalid
@@ -129,7 +137,7 @@ class MemoryCardRepository(
         val temp = File(core.memoryCardsDir, "$name$TEMP_SUFFIX").apply { delete() }
         val input = contentResolver.openInputStream(uri) ?: return MemoryCardResult.Failed
         input.use { temp.outputStream().use { out -> it.copyTo(out) } }
-        if (Ps1Card.open(temp)?.state != CardState.Formatted) {
+        if (SaturnBackupRam.open(temp)?.state != CardState.Formatted) {
             temp.delete()
             return MemoryCardResult.Invalid
         }
@@ -142,33 +150,20 @@ class MemoryCardRepository(
     suspend fun listSaves(card: MemoryCard): SaveListing? = withContext(Dispatchers.IO) {
         runCatching {
             val c = open(card) ?: return@runCatching null
-            SaveListing(c.state, c.list(), c.freeKilobytes(), CAPACITY_KILOBYTES)
+            SaveListing(c.state, c.list(), c.freeBlocks(), c.capacityBlocks)
         }.getOrNull()
     }
 
     /**
-     * The icons of the saves on every card, drawn [size] pixels wide with the icon filling [fill]
-     * of it. With a [serial], only the saves of that game. Saves without an icon are left out.
+     * The icons of the saves on every card, for a shortcut's icon. Saturn saves have no icon, so
+     * there are none; the parameters stay for the library's PS1-era callers.
      */
-    suspend fun saveIcons(size: Int, fill: Float, serial: String? = null): List<SaveIconChoice> = withContext(Dispatchers.IO) {
-        list().flatMap { card ->
-            runCatching {
-                val c = open(card) ?: return@runCatching emptyList()
-                c.list()
-                    .filter { serial == null || serialOfSave(it.name) == serial }
-                    .mapNotNull { info ->
-                        val pixels = c.icon(info.name) ?: return@mapNotNull null
-                        SaveIconChoice(card.name, info.name, info.title, iconBitmap(pixels, size, fill))
-                    }
-            }.onFailure { Log.w(TAG, "Reading the saves of ${card.name} failed", it) }.getOrNull().orEmpty()
-        }
-    }
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun saveIcons(size: Int, fill: Float, serial: String? = null): List<SaveIconChoice> = emptyList()
 
-    /** The icon of one save, or null if it cannot be read. */
-    suspend fun saveIcon(cardName: String, saveName: String, size: Int, fill: Float): Bitmap? = withContext(Dispatchers.IO) {
-        val card = list().firstOrNull { it.name == cardName } ?: return@withContext null
-        runCatching { open(card)?.icon(saveName)?.let { iconBitmap(it, size, fill) } }.getOrNull()
-    }
+    /** The icon of one save: none, as [saveIcons]. */
+    @Suppress("UNUSED_PARAMETER")
+    suspend fun saveIcon(cardName: String, saveName: String, size: Int, fill: Float): Bitmap? = null
 
     /** The names among [names] that [target] already has a save for. */
     suspend fun conflicts(target: MemoryCard, names: List<String>): List<String> {
@@ -213,10 +208,10 @@ class MemoryCardRepository(
         }.getOrDefault(MemoryCardResult.Failed).also { changed() }
     }
 
-    private fun open(card: MemoryCard): Ps1Card? = Ps1Card.open(File(core.memoryCardsDir, card.name))
+    private fun open(card: MemoryCard): SaturnBackupRam? = SaturnBackupRam.open(File(core.memoryCardsDir, card.name))
 
     /** Writes [card] over [file] through a temporary copy, so a failure leaves the old card whole. */
-    private fun replace(file: File, card: Ps1Card): Boolean {
+    private fun replace(file: File, card: SaturnBackupRam): Boolean {
         val temp = File(file.parentFile, "${file.name}$TEMP_SUFFIX")
         card.save(temp)
         if (temp.renameTo(file)) return true
@@ -235,14 +230,14 @@ class MemoryCardRepository(
     }
 
     private fun read(file: File): MemoryCard? {
-        if (!file.isFile || file.length() != Ps1Card.SIZE.toLong()) return null
+        if (!file.isFile || SaturnBackupRam.open(file) == null) return null
         return MemoryCard(file.name, file.length(), file.lastModified())
     }
 
-    /** Name with a card extension (".mcd" if it has none), or null if it is empty or unusable. */
+    /** Name with a card extension (".bkr" if it has none), or null if it is empty or unusable. */
     private fun cardName(name: String): String? {
         val clean = sanitize(name) ?: return null
-        return if (hasCardExtension(clean)) clean else "$clean.mcd"
+        return if (hasCardExtension(clean)) clean else "$clean.bkr"
     }
 
     private fun sanitize(name: String): String? =
@@ -265,27 +260,14 @@ class MemoryCardRepository(
         }
     }
 
-    /** The 16×16 [pixels] scaled up without smoothing, centered in a [size] square. */
-    private fun iconBitmap(pixels: IntArray, size: Int, fill: Float): Bitmap {
-        val icon = Bitmap.createBitmap(pixels, 16, 16, Bitmap.Config.ARGB_8888)
-        val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val side = (size * fill).toInt().coerceIn(1, size)
-        val offset = (size - side) / 2
-        Canvas(out).drawBitmap(icon, null, Rect(offset, offset, offset + side, offset + side), Paint().apply { isFilterBitmap = false })
-        icon.recycle()
-        return out
-    }
-
     private fun displayName(uri: Uri): String? =
         contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
             if (it.moveToFirst()) it.getString(0) else null
         }
 
     private companion object {
-        /** The extensions of raw PS1 card images. */
-        val CARD_EXTENSIONS = listOf(".mcd", ".mcr", ".mc", ".srm", ".mem", ".vm1")
-        const val TAG = "MemoryCardRepository"
+        /** The console's backup memory, and a backup memory cart's (gzipped), as Mednafen names them. */
+        val CARD_EXTENSIONS = listOf(".bkr", ".bcr")
         const val TEMP_SUFFIX = ".tmp"
-        const val CAPACITY_KILOBYTES = 15 * 8
     }
 }

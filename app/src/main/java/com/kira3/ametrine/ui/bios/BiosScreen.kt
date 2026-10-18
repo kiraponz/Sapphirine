@@ -171,14 +171,16 @@ fun BiosScreen(
     }
 }
 
-/** E.g. "Japan · SCPH-7000, 7500, 9000 (v4.0 08-18-97 J)". */
+/** E.g. "Japan · sega_101.bin", or just "Unknown BIOS" for an image the core does not know. */
 @Composable
-private fun Bios.details(): String = "${stringResource(metadata.region.labelRes)} · ${metadata.description}"
+private fun Bios.details(): String {
+    val region = stringResource(metadata.region.labelRes)
+    return if (metadata.region == BiosRegion.Unknown) region else "$region · ${metadata.description}"
+}
 
 private val BiosRegion.labelRes: Int
     get() = when (this) {
         BiosRegion.Japan -> R.string.bios_region_japan
-        BiosRegion.Usa -> R.string.bios_region_usa
-        BiosRegion.Europe -> R.string.bios_region_europe
+        BiosRegion.NorthAmericaEurope -> R.string.bios_region_na_eu
         BiosRegion.Unknown -> R.string.bios_region_unknown
     }

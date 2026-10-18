@@ -18,7 +18,7 @@ namespace AndroidHost {
 void SetJavaVM(JavaVM* vm, jclass native_core);
 
 // Sets up Mednafen once per process (MDFNI_Init, MDFNI_InitFinalize with the core's own
-// folder under [data_dir]). False, with a reason in [error], when it cannot run.
+// folder under [data_dir], and the saves in [data_dir]/memcards). False, with a reason in [error], when it cannot run.
 bool Initialize(const std::string& data_dir, std::string* error);
 
 // Boots the disc image at [path] (a /saf/ path or a file: .chd, .ccd, .cue or .toc; empty = the
@@ -37,13 +37,15 @@ void RequestShutdown();
 // Any thread; the CPU thread hands it to the core at the next frame or mid-frame sync.
 void SetPadBind(uint32_t port, uint32_t index, bool pressed);
 
-// Runs without pacing while [enabled], at the fast-forward volume.
+// Runs at the fast-forward speed (SetSetting "Main"/FastForwardSpeed) while [enabled], at the
+// fast-forward volume.
 void SetFastForward(bool enabled);
 
-// Writes one value to the core's base settings. The app sends PS1-era keys the Saturn core has
-// no use for yet: the BIOS path section ("BIOS"/PathNTSCJ|PathNTSCU|PathPAL) is kept for the
-// next boot, the "Audio" section's volumes and buffer size apply at once, and everything else
-// is ignored. See android_host.cpp.
+// Writes one value of the app's settings (CoreKeys.kt). "Core" holds Mednafen's own settings by
+// name, written at the next boot ("ss.scsp.resamp_quality" and "video.deinterlacer" also reach
+// a running game, after CommitSettings); "BIOS" the BIOS file names for the next boot;
+// "Display"/AspectRatio, "Main"/FastForwardSpeed and the "Audio" volumes and buffer size apply
+// at once. Anything else is ignored. See android_host.cpp.
 void SetSetting(const char* section, const char* key, const char* value);
 void CommitSettings();
 
@@ -59,6 +61,10 @@ void SetDisplayLayout(bool portrait_top, uint32_t top_margin);
 // The edges of the surface the on-screen messages and overlays keep clear of, in surface pixels.
 // Nothing draws overlays yet.
 void SetOsdSafeArea(uint32_t left, uint32_t top, uint32_t right, uint32_t bottom);
+
+// "<region>\t<description>" for the BIOS image read from [fd] (1 Japan, 2 North America and
+// Europe, -1 unknown), or "" when it is no Saturn BIOS. Does not close [fd].
+std::string GetBiosInfo(int fd);
 
 // The app's SAF documents (SafFiles.kt, through NativeCore's callbacks), for the core's /saf/
 // paths. Any thread.

@@ -2,7 +2,7 @@ package com.kira3.ametrine.emucore.settings
 
 import kotlin.reflect.KProperty0
 
-/** One value in the core's INI-style settings (the same section/key names as DuckStation). */
+/** One value of the core's settings: a Mednafen setting ("Core"/its name) or one of the host's own. */
 internal data class CoreKey(
     val section: String,
     val key: String,
@@ -14,46 +14,28 @@ internal data class CoreKey(
 }
 
 /**
- * Maps [EmulatorSettings] to the core's settings keys. The single place that knows key names;
- * docs/CORE_SETTINGS.md lists them.
+ * Maps [EmulatorSettings] to the core's settings keys (NativeCore.setSetting, which
+ * android_host.cpp reads). The single place that knows key names. Section "Core" holds
+ * Mednafen's own settings by name; "BIOS", "Display", "Main" and "Audio" are the host's.
  */
 internal object CoreKeys {
     fun of(s: EmulatorSettings): List<CoreKey> = KeyWriter().apply { write(s) }.keys
 
-    /**
-     * Keys the app fixes whatever the settings say: features it leaves out, and behavior it
-     * handles itself. Written on every apply.
-     */
+    /** Mednafen settings the app fixes whatever the settings say. Written on every apply. */
     val pinned: List<CoreKey> = KeyWriter().apply {
-        put("Cheevos", "Enabled", "false")
-        put("Main", "EnableDiscordPresence", "false")
-        // Per-game settings are the app's overrides; the core's own game INIs are not used.
-        put("Main", "ApplyGameSettings", "false")
-        // The GameDB's fixes for each game.
-        put("Main", "ApplyCompatibilitySettings", "true")
-        // The activity pauses, saves and exits the game itself.
-        put("Main", "PauseOnFocusLoss", "false")
-        put("Main", "StartPaused", "false")
-        put("Main", "SaveStateOnExit", "false")
-        put("Main", "ConfirmPowerOff", "false")
-        put("PINE", "Enabled", "false")
-        put("Debug", "EnableGDBServer", "false")
-        put("TextureReplacements", "EnableVRAMWriteReplacements", "false")
-        put("TextureReplacements", "DumpVRAMWrites", "false")
-        put("Audio", "Backend", "AAudio")
-        // Cheats are the app's (EmulatorCore.setCheats), not the core's own files.
-        put("Console", "EnableCheats", "false")
-        // The app picks the picture's alignment from the screen's shape (android_host.cpp).
-        put("Display", "Alignment", "Center")
+        // No sound (or anything else) goes to standard output.
+        put("Core", "ss.midi", "none")
+        // The app connects one pad; a multitap waits for the controller settings.
+        put("Core", "ss.input.sport1.multitap", "0")
+        put("Core", "ss.input.sport2.multitap", "0")
+        // The VDP2 rendering thread stays where the scheduler puts it.
+        put("Core", "ss.affinity.vdp2", "0")
+        put("Core", "affinity.cd", "0")
+        // Games not in the cart database get the backup memory cart, as Mednafen does.
+        put("Core", "ss.cart.auto_default", "backup")
+        // The aspect ratio is the app's (Display/AspectRatio); the core sizes lines to match.
+        put("Core", "ss.correct_aspect", "1")
     }.keys
-
-    /** The core's GPU/Renderer for the app's renderer value. */
-    fun rendererName(renderer: String): String = when (renderer) {
-        "opengl" -> "OpenGL"
-        "vulkan" -> "Vulkan"
-        "software" -> "Software"
-        else -> "Automatic"
-    }
 
     private class KeyWriter {
         val keys = ArrayList<CoreKey>()
@@ -81,90 +63,44 @@ internal object CoreKeys {
 
         fun write(s: EmulatorSettings) {
             writeConsole(s.console)
-            writeCpu(s.cpu)
-            writeGpu(s.gpu)
             writeDisplay(s.display)
             writeFrameLimit(s.frameLimit)
             writeAudio(s.audio)
-            writeOsd(s.osd)
             writeSystem(s.system)
-            writeControls(s.controls)
             writeRewind(s.rewind)
         }
 
         private fun writeConsole(c: ConsoleSettings) = with(c) {
             val g = group(EmulatorSettings::console.name)
-            g.string(::region, "Console", "Region")
-            g.bool(::enable8MbRam, "Console", "Enable8MBRAM")
-            g.bool(::fastBoot, "BIOS", "PatchFastBoot")
-            g.int(::cdromReadSpeedup, "CDROM", "ReadSpeedup", 0..10)
-            g.int(::cdromSeekSpeedup, "CDROM", "SeekSpeedup", 0..10)
-            g.bool(::loadImageToRam, "CDROM", "LoadImageToRAM")
-        }
-
-        private fun writeCpu(c: CpuSettings) = with(c) {
-            val g = group(EmulatorSettings::cpu.name)
-            g.string(::executionMode, "CPU", "ExecutionMode")
-            val percent = overclockPercent.coerceIn(10, 1000)
-            val overclock = setOf(g.path(::overclockPercent))
-            put("CPU", "OverclockEnable", (percent != 100).toString(), overclock)
-            put("CPU", "OverclockNumerator", percent.toString(), overclock)
-            put("CPU", "OverclockDenominator", "100", overclock)
-            g.bool(::recompilerICache, "CPU", "RecompilerICache")
-            g.string(::fastmemMode, "CPU", "FastmemMode")
-        }
-
-        private fun writeGpu(gpu: GpuSettings) = with(gpu) {
-            val g = group(EmulatorSettings::gpu.name)
-            put("GPU", "Renderer", rendererName(renderer), setOf(g.path(::renderer)))
-            g.int(::resolutionScale, "GPU", "ResolutionScale", 0..8)
-            g.int(::multisamples, "GPU", "Multisamples", 1..8)
-            g.bool(::perSampleShading, "GPU", "PerSampleShading")
-            g.bool(::trueColor, "GPU", "TrueColor")
-            g.bool(::scaledDithering, "GPU", "ScaledDithering")
-            g.bool(::debanding, "GPU", "Debanding")
-            g.string(::textureFilter, "GPU", "TextureFilter")
-            // Sprites follow the texture filter.
-            put("GPU", "SpriteTextureFilter", textureFilter, setOf(g.path(::textureFilter)))
-            g.string(::lineDetectMode, "GPU", "LineDetectMode")
-            g.string(::downsampleMode, "GPU", "DownsampleMode")
-            g.bool(::disableInterlacing, "GPU", "DisableInterlacing")
-            g.bool(::forceNtscTimings, "GPU", "ForceNTSCTimings")
-            g.bool(::widescreenHack, "GPU", "WidescreenHack")
-            g.bool(::chromaSmoothing24Bit, "GPU", "ChromaSmoothing24Bit")
-            g.bool(::accurateBlending, "GPU", "AccurateBlending")
-            g.bool(::pgxpEnable, "GPU", "PGXPEnable")
-            g.bool(::pgxpCulling, "GPU", "PGXPCulling")
-            g.bool(::pgxpTextureCorrection, "GPU", "PGXPTextureCorrection")
-            g.bool(::pgxpColorCorrection, "GPU", "PGXPColorCorrection")
-            g.bool(::pgxpVertexCache, "GPU", "PGXPVertexCache")
-            g.bool(::pgxpCpu, "GPU", "PGXPCPU")
-            g.bool(::pgxpPreserveProjFp, "GPU", "PGXPPreserveProjFP")
-            g.bool(::pgxpDepthBuffer, "GPU", "PGXPDepthBuffer")
-            g.bool(::useThread, "GPU", "UseThread")
-            g.bool(::threadedPresentation, "GPU", "ThreadedPresentation")
+            val auto = region == "auto"
+            put("Core", "ss.region_autodetect", if (auto) "1" else "0", setOf(g.path(::region)))
+            // A disc that names no region the console knows boots as a Japanese one.
+            put("Core", "ss.region_default", if (auto) "jp" else region, setOf(g.path(::region)))
+            g.string(::cart, "Core", "ss.cart")
+            put("Core", "ss.smpc.autortc", if (autoRtc) "1" else "0", setOf(g.path(::autoRtc)))
+            g.string(::language, "Core", "ss.smpc.autortc.lang")
         }
 
         private fun writeDisplay(d: DisplaySettings) = with(d) {
             val g = group(EmulatorSettings::display.name)
             g.string(::aspectRatio, "Display", "AspectRatio")
-            g.int(::customAspectNumerator, "Display", "CustomAspectRatioNumerator", 1..1000)
-            g.int(::customAspectDenominator, "Display", "CustomAspectRatioDenominator", 1..1000)
-            g.string(::cropMode, "Display", "CropMode")
-            g.string(::deinterlacingMode, "Display", "DeinterlacingMode")
-            g.string(::scaling, "Display", "Scaling")
-            g.bool(::force43For24Bit, "Display", "Force4_3For24Bit")
-            g.bool(::vsync, "Display", "VSync")
-            g.bool(::optimalFramePacing, "Display", "OptimalFramePacing")
-            g.bool(::syncToHostRefreshRate, "Main", "SyncToHostRefreshRate")
-            g.bool(::skipDuplicateFrames, "Display", "SkipPresentingDuplicateFrames")
+            g.string(::deinterlacer, "Core", "video.deinterlacer")
+            put("Core", "ss.h_overscan", if (hOverscan) "1" else "0", setOf(g.path(::hOverscan)))
+            put("Core", "ss.h_blend", if (hBlend) "1" else "0", setOf(g.path(::hBlend)))
+            // The core takes the lines in order: a last line above the first shows the first alone.
+            val ntsc = setOf(g.path(::lineStart), g.path(::lineEnd))
+            val start = lineStart.coerceIn(0, 239)
+            put("Core", "ss.slstart", start.toString(), ntsc)
+            put("Core", "ss.slend", lineEnd.coerceIn(start, 239).toString(), ntsc)
+            val pal = setOf(g.path(::lineStartPal), g.path(::lineEndPal))
+            val startPal = lineStartPal.coerceIn(-16, 271)
+            put("Core", "ss.slstartp", startPal.toString(), pal)
+            put("Core", "ss.slendp", lineEndPal.coerceIn(startPal, 271).toString(), pal)
         }
 
         private fun writeFrameLimit(f: FrameLimitSettings) = with(f) {
             val g = group(EmulatorSettings::frameLimit.name)
-            val speed = if (frameLimitEnable) nominalSpeedPercent.coerceIn(10, 1000) / 100f else 0f
-            put("Main", "EmulationSpeed", speed.toString(), setOf(g.path(::frameLimitEnable), g.path(::nominalSpeedPercent)))
-            put("Main", "FastForwardSpeed", fastForwardSpeed.coerceIn(0, 10).toFloat().toString(), setOf(g.path(::fastForwardSpeed)))
+            g.int(::fastForwardSpeed, "Main", "FastForwardSpeed", 0..10)
         }
 
         private fun writeAudio(a: AudioSettings) = with(a) {
@@ -172,37 +108,20 @@ internal object CoreKeys {
             g.int(::volume, "Audio", "OutputVolume", 0..200)
             g.int(::fastForwardVolume, "Audio", "FastForwardVolume", 0..200)
             g.bool(::muted, "Audio", "OutputMuted")
-            g.string(::stretchMode, "Audio", "StretchMode")
             g.int(::bufferMs, "Audio", "BufferMS", 10..500)
-            g.int(::outputLatencyMs, "Audio", "OutputLatencyMS", 1..500)
-            g.bool(::outputLatencyMinimal, "Audio", "OutputLatencyMinimal")
-            g.bool(::muteCdAudio, "CDROM", "MuteCDAudio")
-        }
-
-        private fun writeOsd(o: OsdSettings) = with(o) {
-            val g = group(EmulatorSettings::osd.name)
-            g.bool(::showFps, "Display", "ShowFPS")
-            g.bool(::showSpeed, "Display", "ShowSpeed")
-            g.bool(::showResolution, "Display", "ShowResolution")
-            g.bool(::showCpu, "Display", "ShowCPU")
-            g.bool(::showGpu, "Display", "ShowGPU")
-            g.bool(::showFrameTimes, "Display", "ShowFrameTimes")
-            g.bool(::showGpuStats, "Display", "ShowGPUStatistics")
-            g.bool(::showInputs, "Display", "ShowInputs")
-            g.bool(::showEnhancements, "Display", "ShowEnhancements")
-            g.bool(::showMessages, "Display", "ShowOSDMessages")
-            g.bool(::showStatusIndicators, "Display", "ShowStatusIndicators")
-            put("Display", "OSDScale", scale.coerceIn(25, 500).toFloat().toString(), setOf(g.path(::scale)))
+            g.int(::resampleQuality, "Core", "ss.scsp.resamp_quality", 0..10)
         }
 
         private fun writeSystem(s: SystemSettings) = with(s) {
             val g = group(EmulatorSettings::system.name)
             // The game's own BIOS for every region; otherwise the core picks one for the region from the BIOS folder.
             for (key in listOf("PathNTSCJ", "PathNTSCU", "PathPAL")) put("BIOS", key, biosFilename, setOf(g.path(::biosFilename)))
-            g.string(::memoryCard1Type, "MemoryCards", "Card1Type")
-            g.string(::memoryCard1File, "MemoryCards", "Card1Path")
-            g.string(::memoryCard2Type, "MemoryCards", "Card2Type")
-            g.string(::memoryCard2File, "MemoryCards", "Card2Path")
+            // Mednafen names a game's files "<disc file>.<md5>.<ext>" (.bkr the console's backup
+            // memory, .bcr a backup cart's, .smpc the clock); shared, every game uses the file's base
+            // name instead. A % in it would read as a format code, so it is doubled.
+            val shared = backupRam == "Shared"
+            val base = backupRamFile.substringBeforeLast('.').ifEmpty { "shared" }.replace("%", "%%")
+            put("Core", "filesys.fname_sav", if (shared) "$base.%x" else "%f.%M%x", setOf(g.path(::backupRam), g.path(::backupRamFile)))
         }
 
         private fun writeRewind(r: RewindSettings) = with(r) {
@@ -210,13 +129,6 @@ internal object CoreKeys {
             g.bool(::enabled, "Main", "RewindEnable")
             put("Main", "RewindFrequency", intervalSeconds.coerceIn(1, 60).toFloat().toString(), setOf(g.path(::intervalSeconds)))
             g.int(::keep, "Main", "RewindSaveSlots", 1..20)
-        }
-
-        private fun writeControls(c: ControlsSettings) = with(c) {
-            val g = group(EmulatorSettings::controls.name)
-            g.string(::padType, "Pad1", "Type")
-            g.bool(::forceAnalogOnReset, "Pad1", "ForceAnalogOnReset")
-            g.bool(::analogDpadInDigitalMode, "Pad1", "AnalogDPadInDigitalMode")
         }
     }
 }

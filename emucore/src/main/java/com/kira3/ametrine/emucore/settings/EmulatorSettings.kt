@@ -4,20 +4,18 @@ import android.view.KeyEvent
 import kotlinx.serialization.Serializable
 
 /**
- * Every emulator setting the app stores, global or per game. The core's settings are a
- * chosen part of aegirine-core's INI keys (docs/CORE_SETTINGS.md); the rest of the core's keys
- * keep their defaults, or are pinned in [CoreKeys].
+ * Every emulator setting the app stores, global or per game. The core's settings are a chosen
+ * part of Mednafen's (the ss module's and a few general ones); the rest keep Mednafen's
+ * defaults, or are pinned in [CoreKeys].
  *
- * Stored as JSON (see [SettingsJson]), nested by group: `{"gpu": {"resolutionScale": 2}, ...}`.
- * Choice values are the core's own names ("Recompiler", "Nearest"), so they stay valid as
- * options are added. Each field's comment names the core key it maps to; fields marked "App
- * side" never reach the core.
+ * Stored as JSON (see [SettingsJson]), nested by group: `{"display": {"aspectRatio": "4:3"}, ...}`.
+ * Choice values are the core's own names where it has them ("extram4", "weave"), so they stay
+ * valid as options are added. Each field's comment names the setting it maps to; fields marked
+ * "App side" never reach the core.
  */
 @Serializable
 data class EmulatorSettings(
     val console: ConsoleSettings = ConsoleSettings(),
-    val cpu: CpuSettings = CpuSettings(),
-    val gpu: GpuSettings = GpuSettings(),
     val display: DisplaySettings = DisplaySettings(),
     val frameLimit: FrameLimitSettings = FrameLimitSettings(),
     val audio: AudioSettings = AudioSettings(),
@@ -30,126 +28,44 @@ data class EmulatorSettings(
     val memoryEditor: MemoryEditorSettings = MemoryEditorSettings(),
 )
 
-/** The console itself and its CD-ROM drive. */
+/** The console: its region, its clock and the cart in its slot. All apply on the next boot. */
 @Serializable
 data class ConsoleSettings(
-    /** Console/Region: "Auto" (from the disc), "NTSC-J", "NTSC-U" or "PAL". Applies on the next boot. */
-    val region: String = "Auto",
-    /** Console/Enable8MBRAM: the 8 MB of the development units. Few games use it. Applies on the next boot. */
-    val enable8MbRam: Boolean = false,
-    /** BIOS/PatchFastBoot: skips the BIOS intro. Applies on the next boot. */
-    val fastBoot: Boolean = true,
-    /** CDROM/ReadSpeedup: 1 is the console's speed, 2..10 times faster, 0 as fast as possible. */
-    val cdromReadSpeedup: Int = 1,
-    /** CDROM/SeekSpeedup: as [cdromReadSpeedup]. */
-    val cdromSeekSpeedup: Int = 1,
-    /** CDROM/LoadImageToRAM: reads the whole disc into memory at boot. Applies on the next boot. */
-    val loadImageToRam: Boolean = false,
+    /** ss.region_autodetect and ss.region_default: "auto" (from the disc), "jp", "na" or "eu". */
+    val region: String = "auto",
+    /** ss.cart: "auto" (what the game needs), "none", "backup", "extram1" or "extram4". */
+    val cart: String = "auto",
+    /** ss.smpc.autortc: sets the console's clock to the phone's at boot. */
+    val autoRtc: Boolean = true,
+    /** ss.smpc.autortc.lang: the BIOS language, "english", "german", "french", "spanish", "italian" or "japanese". */
+    val language: String = "english",
 )
 
-/** The R3000A and its recompiler. */
-@Serializable
-data class CpuSettings(
-    /** CPU/ExecutionMode: "Interpreter", "CachedInterpreter", "Recompiler" or "NewRec". */
-    val executionMode: String = "Recompiler",
-    /** CPU/OverclockEnable, OverclockNumerator/Denominator: the clock as a percent of the console's (100 = off). */
-    val overclockPercent: Int = 100,
-    /** CPU/RecompilerICache: emulates the instruction cache. Slower; few games need it. */
-    val recompilerICache: Boolean = false,
-    /** CPU/FastmemMode: "Disabled", "MMap" or "LUT". */
-    val fastmemMode: String = "MMap",
-)
-
-/** The GPU renderer and its enhancements. */
-@Serializable
-data class GpuSettings(
-    /** GPU/Renderer: "auto", "opengl", "vulkan" or "software". Applies on the next boot. */
-    val renderer: String = "auto",
-    /** GPU/ResolutionScale: 1 native (1x), up to 8; 0 follows the window size. */
-    val resolutionScale: Int = 1,
-    /** GPU/Multisamples: 1 (off), 2, 4 or 8. */
-    val multisamples: Int = 1,
-    /** GPU/PerSampleShading: supersampling instead of multisampling. */
-    val perSampleShading: Boolean = false,
-    /** GPU/TrueColor: 24-bit color instead of the console's 15-bit with dithering. */
-    val trueColor: Boolean = true,
-    /** GPU/ScaledDithering: dithering follows the resolution scale. */
-    val scaledDithering: Boolean = true,
-    /** GPU/Debanding. */
-    val debanding: Boolean = false,
-    /** GPU/TextureFilter: "Nearest", "Bilinear", "BilinearBinAlpha", "JINC2", "JINC2BinAlpha", "xBR" or "xBRBinAlpha". */
-    val textureFilter: String = "Nearest",
-    /** GPU/LineDetectMode: "Disabled", "Quads", "BasicTriangles" or "AggressiveTriangles". */
-    val lineDetectMode: String = "Disabled",
-    /** GPU/DownsampleMode: "Disabled", "Box" or "Adaptive". */
-    val downsampleMode: String = "Disabled",
-    /** GPU/DisableInterlacing: draws interlaced frames whole. */
-    val disableInterlacing: Boolean = true,
-    /** GPU/ForceNTSCTimings: runs PAL games at 60 Hz. */
-    val forceNtscTimings: Boolean = false,
-    /** GPU/WidescreenHack: widens 3D scenes. */
-    val widescreenHack: Boolean = false,
-    /** GPU/ChromaSmoothing24Bit: smooths 24-bit movies. */
-    val chromaSmoothing24Bit: Boolean = false,
-    /** GPU/AccurateBlending. */
-    val accurateBlending: Boolean = false,
-    /** GPU/PGXPEnable: precise geometry, which removes the wobble of 3D. */
-    val pgxpEnable: Boolean = false,
-    /** GPU/PGXPCulling. */
-    val pgxpCulling: Boolean = true,
-    /** GPU/PGXPTextureCorrection. */
-    val pgxpTextureCorrection: Boolean = true,
-    /** GPU/PGXPColorCorrection. */
-    val pgxpColorCorrection: Boolean = false,
-    /** GPU/PGXPVertexCache. */
-    val pgxpVertexCache: Boolean = false,
-    /** GPU/PGXPCPU: PGXP for every CPU instruction. Slow; fixes some games. */
-    val pgxpCpu: Boolean = false,
-    /** GPU/PGXPPreserveProjFP. */
-    val pgxpPreserveProjFp: Boolean = false,
-    /** GPU/PGXPDepthBuffer. */
-    val pgxpDepthBuffer: Boolean = false,
-    /** GPU/UseThread: the software renderer on its own thread. */
-    val useThread: Boolean = true,
-    /** GPU/ThreadedPresentation (Vulkan). */
-    val threadedPresentation: Boolean = true,
-)
-
-/** How the picture is fitted to the screen. */
+/** How the picture is made and fitted to the screen. */
 @Serializable
 data class DisplaySettings(
-    /** Display/AspectRatio: "Auto (Game Native)", "Auto (Match Window)", "Custom", "4:3", "16:9", "19:9", "20:9" or "PAR 1:1". */
-    val aspectRatio: String = "Auto (Game Native)",
-    /** Display/CustomAspectRatioNumerator, used with "Custom". */
-    val customAspectNumerator: Int = 16,
-    /** Display/CustomAspectRatioDenominator. */
-    val customAspectDenominator: Int = 9,
-    /** Display/CropMode: "None", "Overscan" or "Borders". */
-    val cropMode: String = "Overscan",
-    /** Display/DeinterlacingMode: "Disabled", "Weave", "Blend" or "Adaptive". */
-    val deinterlacingMode: String = "Adaptive",
-    /** Display/Scaling: "Nearest", "NearestInteger", "BilinearSmooth", "BilinearSharp" or "BilinearInteger". */
-    val scaling: String = "BilinearSmooth",
-    /** Display/Force4_3For24Bit: movies at 4:3 whatever the aspect ratio. */
-    val force43For24Bit: Boolean = false,
-    /** Display/VSync. */
-    val vsync: Boolean = false,
-    /** Display/OptimalFramePacing. */
-    val optimalFramePacing: Boolean = false,
-    /** Main/SyncToHostRefreshRate: runs at the screen's rate when it is close to the game's. */
-    val syncToHostRefreshRate: Boolean = false,
-    /** Display/SkipPresentingDuplicateFrames. */
-    val skipDuplicateFrames: Boolean = false,
+    /** The picture's shape: "4:3", "16:9" or "Stretch" (the whole screen). App side (android_host.cpp). */
+    val aspectRatio: String = "4:3",
+    /** video.deinterlacer: "weave", "bob", "bob_offset" or "blend", for the few interlaced screens. */
+    val deinterlacer: String = "weave",
+    /** ss.h_overscan: shows the picture's left and right edges, which a TV hid. Applies on the next boot. */
+    val hOverscan: Boolean = true,
+    /** ss.h_blend: blurs neighbouring pixels together, as a TV did for dithered transparency. Applies on the next boot. */
+    val hBlend: Boolean = false,
+    /** ss.slstart: the first line shown of an NTSC picture (0..239). Applies on the next boot. */
+    val lineStart: Int = 0,
+    /** ss.slend: the last line shown of an NTSC picture (0..239). Applies on the next boot. */
+    val lineEnd: Int = 239,
+    /** ss.slstartp: the first line shown of a PAL picture (-16..271). Applies on the next boot. */
+    val lineStartPal: Int = 0,
+    /** ss.slendp: the last line shown of a PAL picture (-16..271). Applies on the next boot. */
+    val lineEndPal: Int = 255,
 )
 
-/** Speed, and the buttons over the game. */
+/** Fast forward, and the buttons over the game. */
 @Serializable
 data class FrameLimitSettings(
-    /** Main/EmulationSpeed is 0 (unlimited) when off. */
-    val frameLimitEnable: Boolean = true,
-    /** Main/EmulationSpeed as a percent of full speed (10..1000). */
-    val nominalSpeedPercent: Int = 100,
-    /** Main/FastForwardSpeed as a multiple of full speed (2..10), or 0 for as fast as possible. */
+    /** Main/FastForwardSpeed: fast forward as a multiple of full speed (2..10), or 0 for as fast as possible. */
     val fastForwardSpeed: Int = 0,
     /** Show the fast-forward button over the game. App side. */
     val fastForwardButton: Boolean = true,
@@ -168,60 +84,28 @@ data class AudioSettings(
     val fastForwardVolume: Int = 100,
     /** Audio/OutputMuted. */
     val muted: Boolean = false,
-    /** Audio/StretchMode: "Off", "Resample" or "TimeStretch". */
-    val stretchMode: String = "TimeStretch",
-    /** Audio/BufferMS. */
+    /** Audio/BufferMS: the sound kept ready ahead of the speaker. More is steadier, less is quicker. */
     val bufferMs: Int = 100,
-    /** Audio/OutputLatencyMS. */
-    val outputLatencyMs: Int = 20,
-    /** Audio/OutputLatencyMinimal: the smallest buffer the device allows, ignoring [outputLatencyMs]. */
-    val outputLatencyMinimal: Boolean = false,
-    /** CDROM/MuteCDAudio: silences CD audio tracks and XA. */
-    val muteCdAudio: Boolean = false,
+    /** ss.scsp.resamp_quality: the quality of the conversion to the phone's rate (0..10). */
+    val resampleQuality: Int = 4,
 )
 
-/** What the core draws over the game (Display/Show*). */
+/** What the app shows over the game. App side. */
 @Serializable
 data class OsdSettings(
-    /** Display/ShowFPS. */
+    /** The frame rate, in a corner. */
     val showFps: Boolean = false,
-    /** Display/ShowSpeed. */
-    val showSpeed: Boolean = false,
-    /** Display/ShowResolution. */
-    val showResolution: Boolean = false,
-    /** Display/ShowCPU. */
-    val showCpu: Boolean = false,
-    /** Display/ShowGPU. */
-    val showGpu: Boolean = false,
-    /** Display/ShowFrameTimes. */
-    val showFrameTimes: Boolean = false,
-    /** Display/ShowGPUStatistics. */
-    val showGpuStats: Boolean = false,
-    /** Display/ShowInputs. */
-    val showInputs: Boolean = false,
-    /** Display/ShowEnhancements: lists the enhancements in use. */
-    val showEnhancements: Boolean = false,
-    /** Display/ShowOSDMessages: notifications such as "state saved". */
-    val showMessages: Boolean = true,
-    /** Display/ShowStatusIndicators: icons for pause, fast forward and the like. */
-    val showStatusIndicators: Boolean = true,
-    /** Display/OSDScale: 25..500 percent. */
-    val scale: Int = 100,
 )
 
-/** The memory cards and the per-game BIOS. */
+/** The per-game BIOS and the backup memory. Apply on the next boot. */
 @Serializable
 data class SystemSettings(
-    /** BIOS file (in the BIOS folder) for this game, or "" to let the core pick one for the game's region. Applies on the next boot. */
+    /** BIOS file (in the BIOS folder) for this game, or "" to let the core pick one for the game's region. */
     val biosFilename: String = "",
-    /** MemoryCards/Card1Type: "None", "Shared", "PerGame", "PerGameTitle", "PerGameFileTitle" or "NonPersistent". */
-    val memoryCard1Type: String = "PerGameTitle",
-    /** MemoryCards/Card1Path: the card (in the card folder) slot 1 holds when it is "Shared". */
-    val memoryCard1File: String = "shared_card_1.mcd",
-    /** MemoryCards/Card2Type. */
-    val memoryCard2Type: String = "None",
-    /** MemoryCards/Card2Path. */
-    val memoryCard2File: String = "shared_card_2.mcd",
+    /** filesys.fname_sav: "PerGame" (a backup memory file for each game) or "Shared" (one for every game, as on the console). */
+    val backupRam: String = "PerGame",
+    /** The backup memory file (in the card folder) every game uses when [backupRam] is "Shared". */
+    val backupRamFile: String = "shared.bkr",
 )
 
 /** The play screen. App side, apart from [customDriverId]. */
@@ -241,15 +125,9 @@ data class OutputSettings(
     val turnipUbwcHint: Boolean = false,
 )
 
-/** The controller in port 1 ([padType] and the two after it), and the on-screen pad (app side). */
+/** The on-screen pad and physical controllers. App side. */
 @Serializable
 data class ControlsSettings(
-    /** Pad1/Type: "AnalogController" (DualShock) or "DigitalController". */
-    val padType: String = "AnalogController",
-    /** Pad1/ForceAnalogOnReset: start in analog mode. The GameDB turns it off for games that need digital. */
-    val forceAnalogOnReset: Boolean = true,
-    /** Pad1/AnalogDPadInDigitalMode: the left stick works as the D-pad in digital mode. */
-    val analogDpadInDigitalMode: Boolean = true,
     /** 0 = sticks drawn at a fixed place, 1 = sticks that appear where a finger touches an empty part of the screen. */
     val stickMode: Int = 0,
     /** How opaque the pad is, as a percent (20..100). */
@@ -291,7 +169,7 @@ data class ButtonMapSettings(
     val start: Int = KeyEvent.KEYCODE_BUTTON_START,
 )
 
-/** Rewind: points the core keeps in memory as the game runs, for the player to go back to. */
+/** Rewind: points the core keeps in memory as the game runs, for the player to go back to. Not in the core yet. */
 @Serializable
 data class RewindSettings(
     /** Main/RewindEnable. Off by default: each point stalls the game for a moment. */

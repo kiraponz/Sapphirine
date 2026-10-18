@@ -147,7 +147,7 @@ data object GameBiosSetting : Setting(
 /** The custom Vulkan driver, picked on its own screen where packs are also installed. */
 data object GpuDriverSetting : Setting(
     "output.customDriverId", R.string.settings_gpu_driver, R.string.settings_gpu_driver_summary, null,
-    enabledWhen = { it.string("gpu.renderer") in setOf("auto", "vulkan") },
+    null,
 )
 
 /** The BIOS files the app holds, managed on their own screen. */
@@ -180,14 +180,14 @@ class ResetSetting(
     val defaults: List<Pair<String, Any>>,
 ) : Setting(null, title, summary, null, null)
 
-/** The card in a memory card slot, chosen from the cards the app holds. */
+/** A backup memory file, chosen from the files the app holds (MemoryCardRepository). */
 class MemoryCardSlotSetting(
     path: String,
     @StringRes title: Int,
     enabledWhen: ((SettingsValues) -> Boolean)? = null,
 ) : Setting(path, title, 0, null, enabledWhen)
 
-/** The memory cards the app holds, managed on their own screen. */
+/** The backup memory files the app holds, managed on their own screen. */
 data object MemoryCardsManageSetting : Setting(
     null, R.string.settings_memory_cards_manage, R.string.settings_memory_cards_manage_summary, null, null, globalOnly = true,
 )

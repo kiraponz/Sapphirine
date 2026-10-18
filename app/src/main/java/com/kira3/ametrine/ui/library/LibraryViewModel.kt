@@ -41,7 +41,7 @@ data class LibraryUiState(
     val hasGameFolder: Boolean = false,
     /** Null until the cached list has been read. */
     val games: List<LibraryEntry>? = null,
-    /** Files the core found no PS1 disc in; they sit under their own heading at the end. */
+    /** Files the core found no Saturn disc in; they sit under their own heading at the end. */
     val unrecognized: List<Game> = emptyList(),
     val refreshing: Boolean = false,
     val sort: LibrarySort = LibrarySort.RecentlyPlayed,

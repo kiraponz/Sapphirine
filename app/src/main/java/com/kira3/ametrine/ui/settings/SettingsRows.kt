@@ -73,6 +73,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import com.kira3.ametrine.data.GpuDriver
+import com.kira3.ametrine.emucore.BiosRegion
 import com.kira3.ametrine.emucore.settings.SettingsValues
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -142,17 +143,20 @@ private fun biosChoice(state: SettingsUiState): Choice = Choice(
     GameBiosSetting.title,
     GameBiosSetting.summary,
     options = listOf(Option("", Label.res(R.string.settings_bios_default))) +
-        state.bioses.map { Option(it.fileName, Label.text("${it.metadata.description} (${it.fileName})")) },
+        state.bioses.map { bios ->
+            val known = bios.metadata.region != BiosRegion.Unknown
+            Option(bios.fileName, Label.text(if (known) "${bios.metadata.description} (${bios.fileName})" else bios.fileName))
+        },
     gameOnly = true,
 )
 
 @Composable
 private fun cardChoice(setting: MemoryCardSlotSetting, state: SettingsUiState, values: SettingsValues): Choice {
     val current = values.string(setting.path!!)
-    // The file system ignores case, so a stored "shared_card_1.mcd" is the card "Shared_Card_1.mcd": keep the stored
+    // The file system ignores case, so a stored "shared.bkr" is the card "Shared.bkr": keep the stored
     // spelling as the value so that card shows as selected.
     val options = state.cards.map { card ->
-        Option(if (card.name.equals(current, ignoreCase = true)) current else card.name, Label.text(card.name))
+        Option(if (card.name.equals(current, ignoreCase = true)) current else card.name, Label.text(card.label))
     }
     // The card in use is offered even if its file does not exist yet: the core creates it on first use.
     val all = if (current.isEmpty() || options.any { it.value == current }) options else options + Option(current, Label.text(current))
