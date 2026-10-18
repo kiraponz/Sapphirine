@@ -197,7 +197,7 @@ class LibraryViewModel(
 
     fun onDiscardDismissed() = transient.update { it.copy(discardRequest = null) }
 
-    /** Starts the BIOS itself, with no disc: the PS2 system menu. */
+    /** Starts the BIOS itself, with no disc: the Saturn's BIOS screen. */
     fun onBootBiosClicked() {
         if (uiState.value.bios == null) {
             showMessage(LibraryMessage.BiosRequired)
