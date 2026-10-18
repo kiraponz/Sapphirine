@@ -31,6 +31,10 @@ bool HasActiveSystem();
 void RequestPause(bool paused);
 void RequestShutdown();
 
+// Presses or releases the button at bit [index] (PadButton.code) of the pad on [port] (0 or 1).
+// Any thread; the CPU thread hands it to the core at the next frame or mid-frame sync.
+void SetPadBind(uint32_t port, uint32_t index, bool pressed);
+
 // Runs without pacing while [enabled], at the fast-forward volume.
 void SetFastForward(bool enabled);
 

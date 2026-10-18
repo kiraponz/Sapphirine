@@ -87,16 +87,18 @@ internal object NativeCore {
     @JvmStatic external fun getFps(): Float
     @JvmStatic external fun getFrameNumber(): Long
 
-    // ---- Not available yet: these keep the frontend compiling until their task comes up ----
+    // ---- Input and speed ----
 
-    /** Sets bind [index] (a [PadButton.code], or a half axis after them) of the pad in [port] to [value] (0..1). */
-    @JvmStatic fun setPadBind(port: Int, index: Int, value: Float) = Unit
-
-    /** Moves the left or [right] stick of the pad in [port] to ([x], [y]), each -1..1 with +y down. */
-    @JvmStatic fun setPadStick(port: Int, right: Boolean, x: Float, y: Float) = Unit
+    /** Presses ([value] > 0.5) or releases the button [index] (a [PadButton.code]) of the pad in [port] (0 or 1). */
+    @JvmStatic external fun setPadBind(port: Int, index: Int, value: Float)
 
     /** Runs as fast as it can while [enabled], at the fast-forward volume. */
     @JvmStatic external fun setFastForward(enabled: Boolean)
+
+    // ---- Not available yet: these keep the frontend compiling until their task comes up ----
+
+    /** Moves the left or [right] stick of the pad in [port] to ([x], [y]), each -1..1 with +y down. Not used until the 3D Control Pad. */
+    @JvmStatic fun setPadStick(port: Int, right: Boolean, x: Float, y: Float) = Unit
 
     /** Saves the running game to [path]. Blocks. Null when it did, or why not. */
     @JvmStatic fun saveState(path: String): String? = "Not available yet"

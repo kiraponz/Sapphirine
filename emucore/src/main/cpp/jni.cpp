@@ -175,3 +175,9 @@ extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setFastForward)(JNIEnv*, jclass, j
 {
 	AndroidHost::SetFastForward(enabled == JNI_TRUE);
 }
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setPadBind)(JNIEnv*, jclass, jint port, jint index, jfloat value)
+{
+	if (port >= 0 && index >= 0)
+		AndroidHost::SetPadBind((uint32_t)port, (uint32_t)index, value > 0.5f);
+}

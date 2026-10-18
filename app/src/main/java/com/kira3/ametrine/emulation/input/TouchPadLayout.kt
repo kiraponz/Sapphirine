@@ -106,7 +106,7 @@ internal fun controllerLayout(size: Size, maxUnit: Float): TouchPadLayout {
  * Places the controls for an area of [size]. Everything is sized from one unit, so the pad
  * scales with the screen; [maxUnit] keeps it from growing huge on tablets.
  *
- * Landscape puts the clusters on either side of the picture, as on a DualShock 2. Portrait
+ * Landscape puts the clusters on either side of the picture, as on a Saturn pad. Portrait
  * stacks them under the picture, which the core draws at the top of the screen.
  */
 internal fun touchPadLayout(size: Size, maxUnit: Float): TouchPadLayout =
@@ -116,30 +116,22 @@ private fun landscapeLayout(size: Size, maxUnit: Float): TouchPadLayout {
     val (w, h) = size
     val u = min(min(h / 6.5f, w / 14f), maxUnit)
     val m = 0.35f * u
-    val clusterY = h - m - 3.2f * u
-    val stickY = h - m - 1.2f * u
+    val clusterY = h - m - 2.3f * u
     val shoulder = Size(1.7f * u, 0.85f * u)
     val extraGap = 1.25f * u
 
     return TouchPadLayout(
         u,
         buildList {
-            add(pill(PadButton.L2, Offset(m, m), shoulder))
-            add(pill(PadButton.L1, Offset(m + 1.9f * u, m), shoulder))
-            add(pill(PadButton.R1, Offset(w - m - 1.9f * u - shoulder.width, m), shoulder))
-            add(pill(PadButton.R2, Offset(w - m - shoulder.width, m), shoulder))
+            add(pill(PadButton.L, Offset(m, m), shoulder))
+            add(pill(PadButton.R, Offset(w - m - shoulder.width, m), shoulder))
 
             add(TouchControl.DPad(Offset(m + 1.5f * u, clusterY), 1.45f * u))
-            addAll(faceButtons(Offset(w - m - 1.5f * u, clusterY), u))
+            addAll(faceButtons(Offset(w - m - FACE_HALF_WIDTH * u, clusterY), u))
 
-            add(TouchControl.Stick(PadStick.Left, Offset(m + 3.7f * u, stickY), 1.15f * u))
-            add(TouchControl.Stick(PadStick.Right, Offset(w - m - 3.7f * u, stickY), 1.15f * u))
-            add(round(PadButton.L3, Offset(m + 0.55f * u, h - m - 0.55f * u), 0.42f * u))
-            add(round(PadButton.R3, Offset(w - m - 0.55f * u, h - m - 0.55f * u), 0.42f * u))
-
-            addAll(selectStart(Offset(w / 2, h - m - 0.35f * u), u))
+            add(start(Offset(w / 2, h - m - 0.35f * u), u))
         },
-        // Along the top between L1 and R1: below the shoulder buttons they sat on the D-pad and the face buttons.
+        // Along the top between L and R.
         mapOf(
             PadExtra.FastForward to Offset(w / 2, m + shoulder.height / 2),
             PadExtra.Rewind to Offset(w / 2 - 2 * extraGap, m + shoulder.height / 2),
@@ -154,35 +146,26 @@ private fun portraitLayout(size: Size, maxUnit: Float): TouchPadLayout {
     val (w, h) = size
     val u = min(w / 9.6f, maxUnit)
     val m = 0.35f * u
-    val top = h - m - 7.65f * u
-    val clusterY = top + 3.55f * u
-    val stickY = top + 6.45f * u
+    val top = h - m - 5.2f * u
+    val clusterY = top + 3.5f * u
     val shoulder = Size(1.7f * u, 0.8f * u)
-    val shoulderGap = 0.95f * u
 
     return TouchPadLayout(
         u,
         buildList {
-            add(pill(PadButton.L2, Offset(m, top), shoulder))
-            add(pill(PadButton.L1, Offset(m, top + shoulderGap), shoulder))
-            add(pill(PadButton.R2, Offset(w - m - shoulder.width, top), shoulder))
-            add(pill(PadButton.R1, Offset(w - m - shoulder.width, top + shoulderGap), shoulder))
-            addAll(selectStart(Offset(w / 2, top + 0.6f * u), u))
+            add(pill(PadButton.L, Offset(m, top), shoulder))
+            add(pill(PadButton.R, Offset(w - m - shoulder.width, top), shoulder))
+            add(start(Offset(w / 2, top + 0.4f * u), u))
 
             add(TouchControl.DPad(Offset(m + 1.5f * u, clusterY), 1.45f * u))
-            addAll(faceButtons(Offset(w - m - 1.5f * u, clusterY), u))
-
-            add(TouchControl.Stick(PadStick.Left, Offset(m + 2.6f * u, stickY), 1.15f * u))
-            add(TouchControl.Stick(PadStick.Right, Offset(w - m - 2.6f * u, stickY), 1.15f * u))
-            add(round(PadButton.L3, Offset(m + 0.5f * u, stickY + 0.75f * u), 0.42f * u))
-            add(round(PadButton.R3, Offset(w - m - 0.5f * u, stickY + 0.75f * u), 0.42f * u))
+            addAll(faceButtons(Offset(w - m - FACE_HALF_WIDTH * u, clusterY), u))
         },
         mapOf(
-            // Under Select/Start, between the D-pad and the face buttons.
+            // Under Start, between the D-pad and the face buttons.
             PadExtra.FastForward to Offset(w / 2, top + 1.6f * u),
-            // Above L2, in the empty space under the picture.
+            // Above L, in the empty space under the picture.
             PadExtra.Rewind to Offset(m + shoulder.width / 2, top - 1.6f * u),
-            // Above R2, mirroring rewind.
+            // Above R, mirroring rewind.
             PadExtra.Screenshot to Offset(w - m - shoulder.width / 2, top - 1.6f * u),
             // Beside rewind.
             PadExtra.Macro to Offset(m + shoulder.width / 2 + 1.4f * u, top - 1.6f * u),
@@ -192,24 +175,31 @@ private fun portraitLayout(size: Size, maxUnit: Float): TouchPadLayout {
     )
 }
 
+/** Half the width of the face buttons' block, in units: from its center to the outer edge of C and Z. */
+private const val FACE_HALF_WIDTH = 1.75f
+
+/**
+ * The six face buttons in the Saturn pad's two rows: X Y Z on top, A B C below, the top row
+ * shifted right as on the pad, so each top button sits between two bottom ones' columns.
+ */
 private fun faceButtons(center: Offset, u: Float): List<TouchControl> {
-    val d = 0.92f * u
-    val r = 0.58f * u
+    val dx = 1.05f * u
+    val dy = 0.55f * u
+    val shift = 0.2f * u
+    val r = 0.5f * u
     return listOf(
-        round(PadButton.Triangle, center + Offset(0f, -d), r),
-        round(PadButton.Circle, center + Offset(d, 0f), r),
-        round(PadButton.Cross, center + Offset(0f, d), r),
-        round(PadButton.Square, center + Offset(-d, 0f), r),
+        round(PadButton.X, center + Offset(-dx + shift, -dy), r),
+        round(PadButton.Y, center + Offset(shift, -dy), r),
+        round(PadButton.Z, center + Offset(dx + shift, -dy), r),
+        round(PadButton.A, center + Offset(-dx - shift, dy), r),
+        round(PadButton.B, center + Offset(-shift, dy), r),
+        round(PadButton.C, center + Offset(dx - shift, dy), r),
     )
 }
 
-private fun selectStart(center: Offset, u: Float): List<TouchControl> {
+private fun start(center: Offset, u: Float): TouchControl {
     val size = Size(1.3f * u, 0.55f * u)
-    val dx = 0.8f * u
-    return listOf(
-        pill(PadButton.Select, center + Offset(-dx - size.width / 2, -size.height / 2), size),
-        pill(PadButton.Start, center + Offset(dx - size.width / 2, -size.height / 2), size),
-    )
+    return pill(PadButton.Start, center - Offset(size.width / 2, size.height / 2), size)
 }
 
 private fun pill(button: PadButton, topLeft: Offset, size: Size) =

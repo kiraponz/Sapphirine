@@ -260,7 +260,7 @@ data class ControlsSettings(
     val padIdleSeconds: Int = 15,
     /** Stick dead zone of a physical controller, as a percent of the stick's travel. */
     val stickDeadzone: Int = 15,
-    /** How far a physical controller's analog trigger must go to press L2/R2, as a percent. */
+    /** How far a physical controller's analog trigger must go to press its button, as a percent. */
     val triggerThreshold: Int = 8,
     /** Which key of a physical controller presses each pad button. */
     val buttonMap: ButtonMapSettings = ButtonMapSettings(),
@@ -268,7 +268,11 @@ data class ControlsSettings(
 
 /**
  * The Android key code (KeyEvent.KEYCODE_*) that presses each pad button; 0 leaves the button
- * without a key. The D-pad's HAT axis and the analog triggers work whatever is set here.
+ * without a key. The D-pad's HAT axis and the left stick work as the D-pad whatever is set here,
+ * and the analog triggers press the buttons set to L2 and R2.
+ *
+ * The defaults put the Saturn pad on a modern controller as most Saturn ports do: A, B, C along
+ * the bottom row (A, B, R1), X, Y, Z along the top (X, Y, L1), and L, R on the triggers.
  */
 @Serializable
 data class ButtonMapSettings(
@@ -276,18 +280,15 @@ data class ButtonMapSettings(
     val down: Int = KeyEvent.KEYCODE_DPAD_DOWN,
     val left: Int = KeyEvent.KEYCODE_DPAD_LEFT,
     val right: Int = KeyEvent.KEYCODE_DPAD_RIGHT,
-    val cross: Int = KeyEvent.KEYCODE_BUTTON_A,
-    val circle: Int = KeyEvent.KEYCODE_BUTTON_B,
-    val square: Int = KeyEvent.KEYCODE_BUTTON_X,
-    val triangle: Int = KeyEvent.KEYCODE_BUTTON_Y,
-    val l1: Int = KeyEvent.KEYCODE_BUTTON_L1,
-    val r1: Int = KeyEvent.KEYCODE_BUTTON_R1,
-    val l2: Int = KeyEvent.KEYCODE_BUTTON_L2,
-    val r2: Int = KeyEvent.KEYCODE_BUTTON_R2,
-    val l3: Int = KeyEvent.KEYCODE_BUTTON_THUMBL,
-    val r3: Int = KeyEvent.KEYCODE_BUTTON_THUMBR,
+    val a: Int = KeyEvent.KEYCODE_BUTTON_A,
+    val b: Int = KeyEvent.KEYCODE_BUTTON_B,
+    val c: Int = KeyEvent.KEYCODE_BUTTON_R1,
+    val x: Int = KeyEvent.KEYCODE_BUTTON_X,
+    val y: Int = KeyEvent.KEYCODE_BUTTON_Y,
+    val z: Int = KeyEvent.KEYCODE_BUTTON_L1,
+    val l: Int = KeyEvent.KEYCODE_BUTTON_L2,
+    val r: Int = KeyEvent.KEYCODE_BUTTON_R2,
     val start: Int = KeyEvent.KEYCODE_BUTTON_START,
-    val select: Int = KeyEvent.KEYCODE_BUTTON_SELECT,
 )
 
 /** Rewind: points the core keeps in memory as the game runs, for the player to go back to. */

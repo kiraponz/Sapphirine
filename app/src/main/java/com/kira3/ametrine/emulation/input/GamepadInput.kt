@@ -17,7 +17,8 @@ import kotlin.math.max
  *
  * A pad can report the same control twice (the D-pad as keys and as a HAT axis, L2/R2 as
  * keys and as trigger axes), so each source is tracked separately and merged; the core
- * only hears about changes.
+ * only hears about changes. The Saturn pad has no stick, so the left stick also works the
+ * D-pad.
  */
 class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
     /** Called when someone deliberately uses a controller (not just resting stick noise). */
@@ -39,6 +40,10 @@ class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
 
     @Volatile
     private var keyMap: Map<Int, PadButton> = DEFAULT_KEY_MAP
+
+    /** The buttons the analog triggers press: whatever the L2 and R2 keys are assigned to. */
+    private var leftTriggerButton: PadButton? = DEFAULT_KEY_MAP[KeyEvent.KEYCODE_BUTTON_L2]
+    private var rightTriggerButton: PadButton? = DEFAULT_KEY_MAP[KeyEvent.KEYCODE_BUTTON_R2]
     private var deadzone = DEFAULT_DEADZONE
     private var triggerThreshold = DEFAULT_TRIGGER_THRESHOLD
 
@@ -49,13 +54,14 @@ class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
         val map = controls.buttonMap
         val assigned = mapOf(
             PadButton.Up to map.up, PadButton.Down to map.down, PadButton.Left to map.left,
-            PadButton.Right to map.right, PadButton.Cross to map.cross, PadButton.Circle to map.circle,
-            PadButton.Square to map.square, PadButton.Triangle to map.triangle, PadButton.L1 to map.l1,
-            PadButton.R1 to map.r1, PadButton.L2 to map.l2, PadButton.R2 to map.r2, PadButton.L3 to map.l3,
-            PadButton.R3 to map.r3, PadButton.Start to map.start, PadButton.Select to map.select,
+            PadButton.Right to map.right, PadButton.A to map.a, PadButton.B to map.b,
+            PadButton.C to map.c, PadButton.X to map.x, PadButton.Y to map.y, PadButton.Z to map.z,
+            PadButton.L to map.l, PadButton.R to map.r, PadButton.Start to map.start,
         )
         val newMap = HashMap<Int, PadButton>()
         for ((button, key) in assigned) if (key != KeyEvent.KEYCODE_UNKNOWN) newMap[key] = button
+        leftTriggerButton = newMap[KeyEvent.KEYCODE_BUTTON_L2]
+        rightTriggerButton = newMap[KeyEvent.KEYCODE_BUTTON_R2]
         deadzone = (controls.stickDeadzone / 100f).coerceIn(0f, 0.9f)
         triggerThreshold = (controls.triggerThreshold / 100f).coerceIn(0.01f, 0.95f)
         if (newMap != keyMap) {
@@ -98,7 +104,6 @@ class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
             event.getAxisValue(MotionEvent.AXIS_RTRIGGER),
             event.getAxisValue(MotionEvent.AXIS_GAS),
         )
-        flushButtons()
 
         val (rightX, rightY) = rightStickAxes(event.deviceId)
         val leftMag = sendStick(
@@ -111,6 +116,8 @@ class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
             event.getAxisValue(rightX),
             event.getAxisValue(rightY),
         )
+        // After the sticks: the left one presses the D-pad.
+        flushButtons()
 
         val deliberate = hatX != 0f || hatY != 0f ||
             max(leftTrigger, rightTrigger) > DELIBERATE_THRESHOLD ||
@@ -147,16 +154,19 @@ class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
 
     private fun pressureOf(button: PadButton): Float {
         val fromKey = if (keysHeld[button.ordinal]) 1f else 0f
+        val (stickX, stickY) = sentStick[PadStick.Left.ordinal]
         val fromAxis = when (button) {
-            PadButton.Up -> if (hatY < -HAT_THRESHOLD) 1f else 0f
-            PadButton.Down -> if (hatY > HAT_THRESHOLD) 1f else 0f
-            PadButton.Left -> if (hatX < -HAT_THRESHOLD) 1f else 0f
-            PadButton.Right -> if (hatX > HAT_THRESHOLD) 1f else 0f
-            PadButton.L2 -> triggerPressure(leftTrigger)
-            PadButton.R2 -> triggerPressure(rightTrigger)
+            PadButton.Up -> if (hatY < -HAT_THRESHOLD || stickY < -STICK_DPAD_THRESHOLD) 1f else 0f
+            PadButton.Down -> if (hatY > HAT_THRESHOLD || stickY > STICK_DPAD_THRESHOLD) 1f else 0f
+            PadButton.Left -> if (hatX < -HAT_THRESHOLD || stickX < -STICK_DPAD_THRESHOLD) 1f else 0f
+            PadButton.Right -> if (hatX > HAT_THRESHOLD || stickX > STICK_DPAD_THRESHOLD) 1f else 0f
             else -> 0f
         }
-        return max(fromKey, fromAxis)
+        val fromTrigger = max(
+            if (button == leftTriggerButton) triggerPressure(leftTrigger) else 0f,
+            if (button == rightTriggerButton) triggerPressure(rightTrigger) else 0f,
+        )
+        return maxOf(fromKey, fromAxis, fromTrigger)
     }
 
     private fun triggerPressure(value: Float): Float =
@@ -210,19 +220,17 @@ class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
     private companion object {
         val BUTTONS = PadButton.entries
 
+        /** As ButtonMapSettings' defaults. */
         val DEFAULT_KEY_MAP = mapOf(
-            KeyEvent.KEYCODE_BUTTON_A to PadButton.Cross,
-            KeyEvent.KEYCODE_BUTTON_B to PadButton.Circle,
-            KeyEvent.KEYCODE_BUTTON_X to PadButton.Square,
-            KeyEvent.KEYCODE_BUTTON_Y to PadButton.Triangle,
-            KeyEvent.KEYCODE_BUTTON_L1 to PadButton.L1,
-            KeyEvent.KEYCODE_BUTTON_R1 to PadButton.R1,
-            KeyEvent.KEYCODE_BUTTON_L2 to PadButton.L2,
-            KeyEvent.KEYCODE_BUTTON_R2 to PadButton.R2,
-            KeyEvent.KEYCODE_BUTTON_THUMBL to PadButton.L3,
-            KeyEvent.KEYCODE_BUTTON_THUMBR to PadButton.R3,
+            KeyEvent.KEYCODE_BUTTON_A to PadButton.A,
+            KeyEvent.KEYCODE_BUTTON_B to PadButton.B,
+            KeyEvent.KEYCODE_BUTTON_R1 to PadButton.C,
+            KeyEvent.KEYCODE_BUTTON_X to PadButton.X,
+            KeyEvent.KEYCODE_BUTTON_Y to PadButton.Y,
+            KeyEvent.KEYCODE_BUTTON_L1 to PadButton.Z,
+            KeyEvent.KEYCODE_BUTTON_L2 to PadButton.L,
+            KeyEvent.KEYCODE_BUTTON_R2 to PadButton.R,
             KeyEvent.KEYCODE_BUTTON_START to PadButton.Start,
-            KeyEvent.KEYCODE_BUTTON_SELECT to PadButton.Select,
             KeyEvent.KEYCODE_DPAD_UP to PadButton.Up,
             KeyEvent.KEYCODE_DPAD_DOWN to PadButton.Down,
             KeyEvent.KEYCODE_DPAD_LEFT to PadButton.Left,
@@ -234,6 +242,8 @@ class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
         const val DEFAULT_TRIGGER_THRESHOLD = 0.08f
         const val STICK_EPSILON = 0.004f
         const val HAT_THRESHOLD = 0.5f
+        /** How far (after the dead zone) the left stick must lean to press a D-pad direction. */
+        const val STICK_DPAD_THRESHOLD = 0.5f
         const val DELIBERATE_THRESHOLD = 0.5f
     }
 }

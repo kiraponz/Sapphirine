@@ -360,13 +360,14 @@ private fun Modifier.centeredAt(center: Offset): Modifier = layout { measurable,
 
 @Composable
 private fun buttonLabels(): Map<PadButton, String> = mapOf(
-    PadButton.L1 to stringResource(R.string.pad_l1),
-    PadButton.L2 to stringResource(R.string.pad_l2),
-    PadButton.R1 to stringResource(R.string.pad_r1),
-    PadButton.R2 to stringResource(R.string.pad_r2),
-    PadButton.L3 to stringResource(R.string.pad_l3),
-    PadButton.R3 to stringResource(R.string.pad_r3),
-    PadButton.Select to stringResource(R.string.pad_select),
+    PadButton.A to stringResource(R.string.pad_a),
+    PadButton.B to stringResource(R.string.pad_b),
+    PadButton.C to stringResource(R.string.pad_c),
+    PadButton.X to stringResource(R.string.pad_x),
+    PadButton.Y to stringResource(R.string.pad_y),
+    PadButton.Z to stringResource(R.string.pad_z),
+    PadButton.L to stringResource(R.string.pad_l),
+    PadButton.R to stringResource(R.string.pad_r),
     PadButton.Start to stringResource(R.string.pad_start),
 )
 
@@ -543,11 +544,6 @@ private val FillPressed = Color.White.copy(alpha = 0.45f)
 private val Outline = Color.White.copy(alpha = 0.5f)
 private val Label = Color.White.copy(alpha = 0.85f)
 
-private val TriangleColor = Color(0xFF5FD6C2)
-private val CircleColor = Color(0xFFFF7A7A)
-private val CrossColor = Color(0xFF8DB8FF)
-private val SquareColor = Color(0xFFF59AD8)
-
 private fun DrawScope.drawPad(
     layout: TouchPadLayout,
     tracker: TouchTracker,
@@ -592,8 +588,6 @@ private fun DrawScope.drawPad(
                     text,
                     topLeft = b.center - Offset(text.size.width / 2f, text.size.height / 2f),
                 )
-            } else {
-                drawFaceSymbol(control.button, b.center, b.width * 0.22f)
             }
         }
 
@@ -644,31 +638,6 @@ private fun DrawScope.drawDPad(dpad: TouchControl.DPad, pressed: Set<PadButton>,
         close()
     }
     drawPath(outline, Outline, style = stroke)
-}
-
-private fun DrawScope.drawFaceSymbol(button: PadButton, center: Offset, size: Float) {
-    val stroke = Stroke(width = size * 0.28f)
-    when (button) {
-        PadButton.Triangle -> {
-            val path = Path().apply {
-                moveTo(center.x, center.y - size)
-                lineTo(center.x + size * 0.95f, center.y + size * 0.7f)
-                lineTo(center.x - size * 0.95f, center.y + size * 0.7f)
-                close()
-            }
-            drawPath(path, TriangleColor, style = stroke)
-        }
-        PadButton.Circle -> drawCircle(CircleColor, size, center, style = stroke)
-        PadButton.Cross -> {
-            drawLine(CrossColor, center + Offset(-size, -size), center + Offset(size, size), stroke.width)
-            drawLine(CrossColor, center + Offset(size, -size), center + Offset(-size, size), stroke.width)
-        }
-        PadButton.Square -> {
-            val s = size * 0.85f
-            drawRect(SquareColor, center - Offset(s, s), Size(s * 2, s * 2), style = stroke)
-        }
-        else -> Unit
-    }
 }
 
 @Preview(widthDp = 800, heightDp = 380, backgroundColor = 0xFF202020, showBackground = true)

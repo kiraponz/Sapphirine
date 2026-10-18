@@ -423,15 +423,42 @@ void apply_bios_settings()
 // port's lifetime, and zeroes it on every connect — and with an all-zero buffer every device
 // reads "nothing pressed": the gamepad inverts the driver's bits (src/ss/input/gamepad.cpp:
 // buttons = ~data), and the builtin's reset button reads bit 0 (SMPC_UpdateInput). Step 3
-// (the virtual gamepad) will write pressed-button bits into [ptr].
+// The pads' buttons arrive from the UI thread as bits (SetPadBind) and are copied into these
+// buffers on the CPU thread right before each frame.
 struct InputBuffer
 {
 	uint8* ptr = nullptr;
 	uint32_t size = 0;
 };
 
-InputBuffer s_gamepad_buffer;	// Port 0: the digital gamepad, the only real device for now.
+// Without multitaps, virtual ports 0 and 1 are the Saturn's two connectors (MapPorts in
+// src/ss/smpc.cpp); both get a standard pad.
+constexpr unsigned PAD_PORTS = 2;
+
+InputBuffer s_gamepad_buffers[PAD_PORTS];	// Ports 0 and 1: the digital gamepads.
 InputBuffer s_builtin_buffer;	// Port 12: the reset / ST-V buttons, never pressed by us.
+
+// The pressed buttons per pad, one bit per button at its IODevice_Gamepad_IDII position
+// (src/ss/input/gamepad.cpp: Z, Y, X, R, up, down, left, right, B, C, A, Start, -, -, -, L;
+// PadButton.code on the Kotlin side). Written by the UI thread, read by the CPU thread.
+std::atomic<uint16_t> s_pad_bits[PAD_PORTS];
+
+// Hands the pads' current buttons to the core, ahead of MDFNI_Emulate (which reads the buffers
+// as the frame starts, and at its mid-frame syncs). The gamepad device takes the bits as two
+// little-endian bytes and inverts them itself.
+void update_pad_buffers()
+{
+	for(unsigned port = 0; port < PAD_PORTS; port++)
+	{
+		const InputBuffer& buffer = s_gamepad_buffers[port];
+		if(!buffer.ptr || buffer.size < 2)
+			continue;
+
+		const uint16_t bits = s_pad_bits[port].load(std::memory_order_relaxed);
+		buffer.ptr[0] = (uint8)bits;
+		buffer.ptr[1] = (uint8)(bits >> 8);
+	}
+}
 
 // The index of the device called [name] on [port] (PortInfo.DeviceInfo). MDFNI_SetInput takes
 // the index, and the lists can move; looking it up keeps the numbers next to their source.
@@ -461,12 +488,13 @@ InputBuffer connect_device(unsigned port, unsigned type)
 	return ret;
 }
 
-// The BIOS boot's port wiring: a gamepad on port 0, nothing on the 11 other virtual ports,
+// The port wiring: a gamepad on each connector, nothing on the other virtual (multitap) ports,
 // and the builtin switches last. All buffers come back zeroed.
 void connect_input_devices()
 {
-	s_gamepad_buffer = connect_device(0, device_connect_index(0, "gamepad"));
-	for(unsigned port = 1; port < 12; port++)
+	for(unsigned port = 0; port < PAD_PORTS; port++)
+		s_gamepad_buffers[port] = connect_device(port, device_connect_index(port, "gamepad"));
+	for(unsigned port = PAD_PORTS; port < 12; port++)
 		Mednafen::MDFNI_SetInput(port, device_connect_index(port, "none"));
 	s_builtin_buffer = connect_device(12, device_connect_index(12, "builtin"));
 }
@@ -829,6 +857,10 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 
 		open_audio();
 
+		// Every boot starts with nothing held.
+		for(auto& bits : s_pad_bits)
+			bits.store(0, std::memory_order_relaxed);
+
 		s_active.store(true);
 		s_stop.store(false);
 		s_paused = false;
@@ -887,6 +919,8 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 			// ours to restart (Mednafen's own driver uses a fresh espec per frame).
 			s_espec.SoundBufSize_DriverProcessed = 0;
 			s_espec.MasterCycles_DriverProcessed = 0;
+
+			update_pad_buffers();
 
 			const int64_t t0 = now_ns();
 			Mednafen::MDFNI_Emulate(&s_espec);
@@ -1019,6 +1053,18 @@ void RequestShutdown()
 	s_vm_cond.notify_all();
 }
 
+void SetPadBind(uint32_t port, uint32_t index, bool pressed)
+{
+	if(port >= PAD_PORTS || index >= 16)
+		return;
+
+	const uint16_t bit = (uint16_t)(1u << index);
+	if(pressed)
+		s_pad_bits[port].fetch_or(bit, std::memory_order_relaxed);
+	else
+		s_pad_bits[port].fetch_and((uint16_t)~bit, std::memory_order_relaxed);
+}
+
 void SetFastForward(bool enabled)
 {
 	// The frame loop picks it up at the next frame (and restarts the sound when it ends).
@@ -1124,8 +1170,12 @@ namespace Mednafen
 // MDFNI_Emulate.
 void MDFND_MidSync(EmulateSpecStruct* espec, const unsigned flags)
 {
-	(void)flags;
 	push_pending_sound(espec);
+
+	// The module reads the pads again after this (UpdateSMPCInput), so a press that came in
+	// during the frame reaches the game this frame rather than the next.
+	if(flags & MIDSYNC_FLAG_UPDATE_INPUT)
+		update_pad_buffers();
 }
 
 } // namespace Mednafen

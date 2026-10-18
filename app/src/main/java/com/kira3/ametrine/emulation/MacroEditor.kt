@@ -225,7 +225,7 @@ private const val NEW = -1
 private fun EventDialog(initial: MacroEvent?, onDismiss: () -> Unit, onSave: (MacroEvent) -> Unit) {
     var frame by remember { mutableStateOf((initial?.t ?: 0L).toString()) }
     var stickMode by remember { mutableStateOf(initial?.stick != null) }
-    var button by remember { mutableStateOf(PadButton.entries.firstOrNull { it.name == initial?.button } ?: PadButton.Cross) }
+    var button by remember { mutableStateOf(PadButton.entries.firstOrNull { it.name == initial?.button } ?: PadButton.A) }
     var pressed by remember { mutableStateOf(initial?.let { it.button == null || it.pressed } ?: true) }
     var stick by remember { mutableStateOf(PadStick.entries.firstOrNull { it.name == initial?.stick } ?: PadStick.Left) }
     var x by remember { mutableStateOf((initial?.x ?: 0f).toString()) }

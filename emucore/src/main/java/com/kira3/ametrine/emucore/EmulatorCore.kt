@@ -507,8 +507,9 @@ class EmulatorCore(context: Context) {
     // Call these directly from input handlers, not through a ViewModel, to keep latency low.
 
     /**
-     * Presses or releases [button] on [port] (0 = player 1). [pressure] (0..1) is how hard a
-     * pressed button is pushed; a PS1 pad does not sense it, so only [pressed] reaches the game.
+     * Presses or releases [button] on [port] (0 = player 1, 1 = player 2). [pressure] (0..1) is
+     * how hard a pressed button is pushed; the Saturn pad does not sense it, so only [pressed]
+     * reaches the game.
      */
     fun setPadButton(port: Int, button: PadButton, pressed: Boolean, pressure: Float = 1f) {
         padListener?.onButton(port, button, pressed, pressure)
@@ -517,8 +518,8 @@ class EmulatorCore(context: Context) {
 
     /**
      * Moves [stick] on [port] to ([x], [y]), each -1..1 with +x right and +y down. Shape the
-     * input (deadzone) before calling; this sends it as is. The game only reads the sticks once
-     * the pad is in analog mode ([PadButton.Analog]).
+     * input (deadzone) before calling; this sends it as is. The core does not take sticks until
+     * the 3D Control Pad is connected, so for now this only reaches [padListener].
      */
     fun setPadStick(port: Int, stick: PadStick, x: Float, y: Float) {
         padListener?.onStick(port, stick, x, y)

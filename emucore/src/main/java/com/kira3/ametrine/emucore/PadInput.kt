@@ -1,31 +1,26 @@
 package com.kira3.ametrine.emucore
 
 /**
- * A DualShock button. [code] is the core's bind index for it (AnalogController::Button), which
- * the digital pad shares for the buttons it has.
+ * A Saturn Control Pad button. [code] is its bit in the core's gamepad input
+ * (IODevice_Gamepad_IDII in Mednafen's src/ss/input/gamepad.cpp).
  */
 enum class PadButton(internal val code: Int) {
     Up(4),
-    Down(6),
-    Left(7),
-    Right(5),
-    Cross(14),
-    Circle(13),
-    Square(15),
-    Triangle(12),
-    L1(10),
-    R1(11),
-    L2(8),
-    R2(9),
-    L3(1),
-    R3(2),
-    Start(3),
-    Select(0),
-
-    /** The Analog (mode) button, which toggles the pad's analog mode. */
-    Analog(16),
+    Down(5),
+    Left(6),
+    Right(7),
+    A(10),
+    B(8),
+    C(9),
+    X(2),
+    Y(1),
+    Z(0),
+    L(15),
+    R(3),
+    Start(11),
 }
 
+/** A stick of the 3D Control Pad, which the core does not take yet. */
 enum class PadStick {
     Left,
     Right,
