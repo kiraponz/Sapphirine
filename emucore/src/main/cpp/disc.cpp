@@ -189,6 +189,13 @@ public:
 				break;
 	}
 
+	// VirtualFS takes every path for absolute unless told otherwise, which would open a cue
+	// sheet's track files by their bare names. Paths here are POSIX-like: absolute from '/'.
+	bool is_absolute_path(const std::string& path) override
+	{
+		return path.size() && path[0] == '/';
+	}
+
 	// The document's own name: the rest of a /saf/ path is URL-encoded ids, of no use in a message.
 	std::string get_human_path(const std::string& path) override
 	{
