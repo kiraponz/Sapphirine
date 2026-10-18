@@ -76,6 +76,18 @@ bool SafStat(const std::string& path, SafFileInfo* info);
 // The names in the folder at [path]; false when it is not one.
 bool SafList(const std::string& path, std::vector<std::string>* names);
 
+// The discs of a game booted from a .m3u: their [titles] and the [current] one's index. False
+// for a game that is not a playlist, or with no game. Any thread.
+bool GetDiscPlaylist(std::vector<std::string>* titles, int* current);
+
+// Puts disc [index] of the game's disc list in the drive: the tray opens at the next frame and
+// closes on the disc about a second later. False for an index out of range. Any thread.
+bool SwitchDisc(int index);
+
+// Puts the disc image at [path] in the drive in place of the disc there, the same way. Opens
+// the image on the calling thread; false when it cannot. Any thread.
+bool InsertDisc(const std::string& path);
+
 // The last error notice Mednafen gave (MDFND_OutputNotice, driver_stubs.cpp) since the previous
 // call, or "". Its loaders report failures this way instead of throwing.
 std::string TakeCoreErrorNotice();

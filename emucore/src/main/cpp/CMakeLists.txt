@@ -1,8 +1,8 @@
 # Builds libemucore.so: Mednafen 1.32.1's ss module (Sega Saturn) plus the common Mednafen code
 # it needs, and libchdr for CHD images, with the frontend's side in the files here. Mednafen's own
-# sources carry one fix (src/mednafen.cpp, MDFN_LoadCD: MDFNI_LoadExternalCD lost the disc it was
-# given, marked "Sapphirine:"); everything else Mednafen-specific lives here and in
-# config/config.h.
+# sources carry one hook, marked "Sapphirine:" (src/mednafen.cpp's OpenCD opens each disc image
+# through MDFND_OpenCDImage, disc.cpp, declared in src/mednafen-driver.h); everything else
+# Mednafen-specific lives here and in config/config.h.
 
 cmake_minimum_required(VERSION 3.22)
 

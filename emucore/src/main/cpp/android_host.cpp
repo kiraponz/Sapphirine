@@ -647,18 +647,90 @@ void draw_frame()
 // throws with nothing to close but (for the BIOS) the bare descriptor RunSystem's catch drops.
 // ---------------------------------------------------------------------------
 
-// Boots the disc image at [path] (disc.h) through Mednafen's own CD loading, which does
-// everything LoadCDGame does for a file it opened itself, and then closes the tray on it, as
-// Mednafen's driver does after a load with the layout's default (drive 0, "Tray Closed", the
-// first disc).
+// The loaded game's discs, for the app's disc menu and the disc changes. Guarded by s_disc_mutex:
+// the app reads and requests from its threads, the CPU thread loads and carries the changes out.
+std::mutex s_disc_mutex;
+bool s_disc_playlist = false;	// Booted from a .m3u.
+std::vector<AndroidHost::OpenedDisc> s_discs;	// Mednafen's disc list, slot by slot.
+int s_disc_current = -1;	// The slot in the drive (or going in), -1 for none.
+
+// A disc change waiting for the CPU thread: put slot [index] in the drive, after swapping
+// [image] into it when there is one (InsertDisc).
+struct DiscChange
+{
+	int index = -1;
+	std::unique_ptr<Mednafen::CDInterface> image;
+};
+std::unique_ptr<DiscChange> s_disc_change;
+
+// How long the tray stays open for a disc change, in frames: about a second, so the game sees
+// the lid open (the CD block reports it) before the next disc is there.
+constexpr int DISC_CHANGE_FRAMES = 60;
+
+// The change being carried out by the frame loop, and the frames left before the tray closes.
+std::unique_ptr<DiscChange> s_disc_changing;
+int s_disc_change_frames = 0;
+
+// The drive states of Mednafen's CD drive (MDFN_LoadCD's layout).
+constexpr uint32_t DRIVE_TRAY_OPEN = 0;
+constexpr uint32_t DRIVE_TRAY_CLOSED = 2;
+
+void reset_discs()
+{
+	std::lock_guard<std::mutex> lock(s_disc_mutex);
+	s_disc_playlist = false;
+	s_discs.clear();
+	s_disc_current = -1;
+	s_disc_change.reset();
+	s_disc_changing.reset();
+	s_disc_change_frames = 0;
+}
+
+// One step of a disc change, once per frame on the CPU thread: a new request opens the tray,
+// and DISC_CHANGE_FRAMES later the tray closes on the new disc.
+void step_disc_change()
+{
+	if (!s_disc_changing)
+	{
+		int current;
+		{
+			std::lock_guard<std::mutex> lock(s_disc_mutex);
+			if (!s_disc_change)
+				return;
+			s_disc_changing = std::move(s_disc_change);
+			current = std::max(s_disc_current, 0);
+		}
+		Mednafen::MDFNI_SetMedia(0, DRIVE_TRAY_OPEN, (uint32_t)current, 0);
+		s_disc_change_frames = DISC_CHANGE_FRAMES;
+		return;
+	}
+
+	if (--s_disc_change_frames > 0)
+		return;
+
+	std::unique_ptr<DiscChange> change = std::move(s_disc_changing);
+	if (change->image)
+	{
+		AndroidHost::SwappableDisc* slot;
+		{
+			std::lock_guard<std::mutex> lock(s_disc_mutex);
+			slot = s_discs.at((size_t)change->index).slot;
+		}
+		slot->Swap(std::move(change->image));
+	}
+	Mednafen::MDFNI_SetMedia(0, DRIVE_TRAY_CLOSED, (uint32_t)change->index, 0);
+}
+
+// Boots the disc image or .m3u playlist at [path] (disc.h) through Mednafen's own CD loading,
+// as a CD whatever the extension (a .chd is no extension Mednafen knows), with each disc opened
+// by MDFND_OpenCDImage. Then the tray closes on the layout's default disc (drive 0: the first
+// disc, or a playlist's #MEDNAFEN_DEFAULT), as Mednafen's driver does after a load.
 void load_disc(const std::string& path)
 {
-	Mednafen::CDInterface* cdif = AndroidHost::OpenDisc(path);
-
-	// The loader reports its failures as error notices rather than exceptions, and takes the
-	// disc with it either way.
+	// The loader reports its failures as error notices rather than exceptions.
 	AndroidHost::TakeCoreErrorNotice();
-	if (!Mednafen::MDFNI_LoadExternalCD("ss", path.c_str(), cdif))
+	AndroidHost::TakeOpenedDiscs();
+	if (!Mednafen::MDFNI_LoadGame("ss", AndroidHost::DiscVFS(path), path.c_str(), true))
 	{
 		const std::string notice = AndroidHost::TakeCoreErrorNotice();
 		throw std::runtime_error(notice.size() ? notice : "The disc could not be loaded");
@@ -666,8 +738,14 @@ void load_disc(const std::string& path)
 
 	try
 	{
-		if (!Mednafen::MDFNI_SetMedia(0, 2, 0, 0))
+		const Mednafen::RMD_DriveDefaults& defaults = Mednafen::MDFNGameInfo->RMD->DrivesDefaults.at(0);
+		if (!Mednafen::MDFNI_SetMedia(0, defaults.State, defaults.Media, defaults.Orientation))
 			throw std::runtime_error("The disc could not be put in the drive");
+
+		std::lock_guard<std::mutex> lock(s_disc_mutex);
+		s_discs = AndroidHost::TakeOpenedDiscs();
+		s_disc_playlist = Mednafen::NVFS.test_ext(path, ".m3u");
+		s_disc_current = (int)defaults.Media;
 	}
 	catch (...)
 	{
@@ -834,6 +912,7 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 
 	s_frame_number.store(0);
 	s_fps.store(0);
+	reset_discs();
 
 	// Set once MDFNGameInfo can go through MDFNI_CloseGame: CloseGame must only run after a
 	// successful LoadCD (git.h). Seen by the catch below, so it lives at function scope.
@@ -891,6 +970,7 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 			{
 				s_audio.reset();
 				s_sound_buffer.reset();
+				reset_discs();
 				s_active.store(false);
 				s_stop.store(false);
 				s_fps.store(0);
@@ -963,6 +1043,7 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 			s_espec.MasterCycles_DriverProcessed = 0;
 
 			update_pad_buffers();
+			step_disc_change();
 
 			const int64_t t0 = now_ns();
 			Mednafen::MDFNI_Emulate(&s_espec);
@@ -1040,6 +1121,7 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 			Mednafen::MDFNGameInfo = nullptr;
 		}
 		Mednafen::MDFNI_CloseGame();
+		reset_discs();
 
 		s_surface.reset();
 		s_surface_pixels.reset();
@@ -1261,6 +1343,62 @@ bool SafList(const std::string& path, std::vector<std::string>* names)
 		names->push_back(line.substr(0, line.find('\t')));
 	}
 	env->DeleteLocalRef(entries);
+	return true;
+}
+
+bool GetDiscPlaylist(std::vector<std::string>* titles, int* current)
+{
+	std::lock_guard<std::mutex> lock(s_disc_mutex);
+	if (!s_active.load() || !s_disc_playlist)
+		return false;
+
+	for (const OpenedDisc& disc : s_discs)
+		titles->push_back(disc.title);
+	*current = s_disc_current;
+	return true;
+}
+
+bool SwitchDisc(int index)
+{
+	std::lock_guard<std::mutex> lock(s_disc_mutex);
+	if (!s_active.load() || index < 0 || (size_t)index >= s_discs.size())
+		return false;
+
+	if (index == s_disc_current && !s_disc_change)
+		return true;
+
+	s_disc_change.reset(new DiscChange());
+	s_disc_change->index = index;
+	s_disc_current = index;
+	return true;
+}
+
+bool InsertDisc(const std::string& path)
+{
+	// Opened here, on the caller's thread, so a bad image fails the call instead of the frame
+	// loop; the CPU thread only swaps it in.
+	std::unique_ptr<Mednafen::CDInterface> image;
+	try
+	{
+		image = OpenDisc(path);
+	}
+	catch (const std::exception& e)
+	{
+		__android_log_print(ANDROID_LOG_WARN, LOG_TAG, "Cannot insert %s: %s", path.c_str(), e.what());
+		return false;
+	}
+
+	std::lock_guard<std::mutex> lock(s_disc_mutex);
+	if (!s_active.load() || s_discs.empty())
+		return false;
+
+	// The new disc goes into the slot in the drive, which takes its title.
+	const int index = std::max(s_disc_current, 0);
+	s_discs[(size_t)index].title = DiscTitle(path);
+	s_disc_change.reset(new DiscChange());
+	s_disc_change->index = index;
+	s_disc_change->image = std::move(image);
+	s_disc_current = index;
 	return true;
 }
 

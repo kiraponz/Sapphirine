@@ -15,6 +15,7 @@
 #include <android/native_window_jni.h>
 
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -189,4 +190,37 @@ extern "C" JNIEXPORT jstring JNICALL NATIVE_CORE(getGameSerial)(JNIEnv* env, jcl
 {
 	const std::string serial = AndroidHost::ReadDiscSerial(ToString(env, path));
 	return serial.empty() ? nullptr : env->NewStringUTF(serial.c_str());
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL NATIVE_CORE(getDiscPlaylist)(JNIEnv* env, jclass)
+{
+	std::vector<std::string> titles;
+	int current = 0;
+	if (!AndroidHost::GetDiscPlaylist(&titles, &current))
+		return nullptr;
+
+	// The current index first (as a string), then the titles (NativeCore.getDiscPlaylist).
+	jclass string_class = env->FindClass("java/lang/String");
+	jobjectArray ret = env->NewObjectArray((jsize)titles.size() + 1, string_class, nullptr);
+	jstring index = env->NewStringUTF(std::to_string(current).c_str());
+	env->SetObjectArrayElement(ret, 0, index);
+	env->DeleteLocalRef(index);
+	for (size_t i = 0; i < titles.size(); i++)
+	{
+		jstring title = env->NewStringUTF(titles[i].c_str());
+		env->SetObjectArrayElement(ret, (jsize)i + 1, title);
+		env->DeleteLocalRef(title);
+	}
+	env->DeleteLocalRef(string_class);
+	return ret;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL NATIVE_CORE(switchDisc)(JNIEnv*, jclass, jint index)
+{
+	return AndroidHost::SwitchDisc(index) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL NATIVE_CORE(insertDisc)(JNIEnv* env, jclass, jstring path)
+{
+	return AndroidHost::InsertDisc(ToString(env, path)) ? JNI_TRUE : JNI_FALSE;
 }

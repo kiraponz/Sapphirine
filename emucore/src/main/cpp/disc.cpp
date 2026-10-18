@@ -21,6 +21,7 @@
 #include <cerrno>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 using namespace Mednafen;
@@ -227,19 +228,108 @@ std::unique_ptr<CDAccess> open_access(const std::string& path)
 	return std::unique_ptr<CDAccess>(new CDAccess_Image(vfs, path, false));
 }
 
+// The discs opened for the game being loaded (TakeOpenedDiscs). Loading runs on the CPU thread
+// only, but the lock costs nothing.
+std::mutex s_opened_mutex;
+std::vector<OpenedDisc> s_opened_discs;
+
 } // namespace
 
-CDInterface* OpenDisc(const std::string& path)
+SwappableDisc::SwappableDisc(std::unique_ptr<CDInterface> disc) : disc(std::move(disc))
+{
+	this->disc->ReadTOC(&disc_toc);
+}
+
+void SwappableDisc::Swap(std::unique_ptr<CDInterface> next)
+{
+	disc = std::move(next);
+	disc->ReadTOC(&disc_toc);
+}
+
+void SwappableDisc::HintReadSector(int32 lba)
+{
+	disc->HintReadSector(lba);
+}
+
+bool SwappableDisc::ReadRawSector(uint8* buf, int32 lba)
+{
+	return disc->ReadRawSector(buf, lba);
+}
+
+bool SwappableDisc::ReadRawSectorPWOnly(uint8* pwbuf, int32 lba, bool hint_fullread)
+{
+	return disc->ReadRawSectorPWOnly(pwbuf, lba, hint_fullread);
+}
+
+bool SwappableDisc::NonDeterministic_CheckSectorReady(int32 lba)
+{
+	return disc->NonDeterministic_CheckSectorReady(lba);
+}
+
+std::unique_ptr<CDInterface> OpenDisc(const std::string& path)
 {
 	// Single-threaded: the sectors are read on the CPU thread as the emulated drive asks.
 	// (CDInterface::Open only allows that for archives; the SAF documents are plain files.)
-	return new CDInterface_ST(open_access(path));
+	return std::unique_ptr<CDInterface>(new CDInterface_ST(open_access(path)));
+}
+
+VirtualFS* DiscVFS(const std::string& path)
+{
+	return vfs_for(path);
+}
+
+std::string DiscTitle(const std::string& path)
+{
+	std::string base;
+	vfs_for(path)->get_file_path_components(path, nullptr, &base);
+	return base;
+}
+
+std::vector<OpenedDisc> TakeOpenedDiscs()
+{
+	std::lock_guard<std::mutex> lock(s_opened_mutex);
+	std::vector<OpenedDisc> ret;
+	ret.swap(s_opened_discs);
+	return ret;
+}
+
+// The first disc a .m3u lists (blank lines and # comments skipped), resolved against the
+// playlist's folder; "" when it lists none. Nested playlists are followed, a few deep.
+std::string first_m3u_entry(const std::string& path, int depth = 0)
+{
+	VirtualFS* vfs = vfs_for(path);
+	std::unique_ptr<Stream> m3u(vfs->open(path, VirtualFS::MODE_READ));
+	std::string dir;
+	vfs->get_file_path_components(path, &dir);
+
+	std::string line;
+	while (m3u->get_line(line) >= 0)
+	{
+		// A UTF-8 byte order mark on the first line.
+		if (!line.compare(0, 3, "\xEF\xBB\xBF"))
+			line.erase(0, 3);
+		MDFN_trim(&line);
+		if (line.empty() || line[0] == '#')
+			continue;
+
+		const std::string entry = vfs->eval_fip(dir, line);
+		if (vfs->test_ext(entry, ".m3u"))
+			return depth < 4 ? first_m3u_entry(entry, depth + 1) : "";
+		return entry;
+	}
+	return "";
 }
 
 std::string ReadDiscSerial(const std::string& path)
 {
 	try
 	{
+		if (vfs_for(path)->test_ext(path, ".m3u"))
+		{
+			const std::string first = first_m3u_entry(path);
+			return first.empty() ? "" : ReadDiscSerial(first);
+		}
+
 		std::unique_ptr<CDAccess> access = open_access(path);
 
 		// The system ID area (IP.BIN) is the user data of sector 0: "SEGA SEGASATURN ", then
@@ -271,3 +361,24 @@ std::string ReadDiscSerial(const std::string& path)
 }
 
 } // namespace AndroidHost
+
+namespace Mednafen
+{
+
+// Mednafen's CD loading (OpenCD in mednafen.cpp, for a disc or each entry of a .m3u) opens the
+// images through here. [vfs] is the one the path came with, which DiscVFS picks by the path
+// anyway; images are never cached in memory, whatever [image_memcache] says.
+CDInterface* MDFND_OpenCDImage(VirtualFS* vfs, const std::string& path, bool image_memcache, uint64 affinity)
+{
+	(void)vfs;
+	(void)image_memcache;
+	(void)affinity;
+
+	auto ret = new AndroidHost::SwappableDisc(AndroidHost::OpenDisc(path));
+
+	std::lock_guard<std::mutex> lock(AndroidHost::s_opened_mutex);
+	AndroidHost::s_opened_discs.push_back({ ret, AndroidHost::DiscTitle(path) });
+	return ret;
+}
+
+} // namespace Mednafen
