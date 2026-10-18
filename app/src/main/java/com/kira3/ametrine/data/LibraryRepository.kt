@@ -316,11 +316,11 @@ class LibraryRepository(
             Document.COLUMN_LAST_MODIFIED,
         )
 
-        /** What the core boots: disc images, playlists (.m3u), PS-EXEs and PSFs. */
-        val GAME_EXTENSIONS = setOf(
-            "cue", "bin", "img", "iso", "chd", "pbp", "ecm", "mds", "m3u",
-            "exe", "psexe", "ps-exe", "psf", "minipsf",
-        )
+        /**
+         * What the core boots: the disc images Mednafen reads (cue sheets, cdrdao .toc, CloneCD .ccd)
+         * and CHD, and playlists (.m3u). A bare .bin or .iso needs a cue sheet beside it.
+         */
+        val GAME_EXTENSIONS = setOf("cue", "toc", "ccd", "chd", "m3u")
 
         /** Raw images that are usually a cue sheet's tracks. */
         val TRACK_EXTENSIONS = setOf("bin", "img")

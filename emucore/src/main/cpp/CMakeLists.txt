@@ -1,6 +1,8 @@
 # Builds libemucore.so: Mednafen 1.32.1's ss module (Sega Saturn) plus the common Mednafen code
-# it needs, with the frontend hooks stubbed out in driver_stubs.cpp. The Mednafen checkout is not
-# modified in any way; everything Mednafen-specific lives here and in config/config.h.
+# it needs, and libchdr for CHD images, with the frontend's side in the files here. Mednafen's own
+# sources carry one fix (src/mednafen.cpp, MDFN_LoadCD: MDFNI_LoadExternalCD lost the disc it was
+# given, marked "Sapphirine:"); everything else Mednafen-specific lives here and in
+# config/config.h.
 
 cmake_minimum_required(VERSION 3.22)
 
@@ -262,6 +264,8 @@ list(TRANSFORM mednafen_sources PREPEND "${CORE_DIR}/src/")
 add_library(emucore SHARED
 	android_host.cpp
 	audio_stream.cpp
+	cdaccess_chd.cpp
+	disc.cpp
 	driver_stubs.cpp
 	jni.cpp
 	${mednafen_sources}
@@ -301,6 +305,34 @@ set_source_files_properties(${mpcdec_paths} PROPERTIES
 	COMPILE_DEFINITIONS "MPC_FIXED_POINT=1"
 )
 
+# libchdr (BSD-3-Clause) for CHD images (cdaccess_chd.cpp), from <core>/third_party with the
+# LZMA SDK it decompresses with (public domain); its zstd is Mednafen's (src/zstd, above) and its
+# zlib is Android's. Both are taken as DuckStation keeps them (dep/libchdr, dep/lzma).
+set(CHDR_DIR "${CORE_DIR}/third_party/libchdr")
+set(LZMA_DIR "${CORE_DIR}/third_party/lzma")
+set(chdr_paths
+	${CHDR_DIR}/src/libchdr_bitstream.c
+	${CHDR_DIR}/src/libchdr_cdrom.c
+	${CHDR_DIR}/src/libchdr_chd.c
+	${CHDR_DIR}/src/libchdr_flac.c
+	${CHDR_DIR}/src/libchdr_huffman.c
+	${LZMA_DIR}/src/Alloc.c
+	${LZMA_DIR}/src/Bra86.c
+	${LZMA_DIR}/src/BraIA64.c
+	${LZMA_DIR}/src/CpuArch.c
+	${LZMA_DIR}/src/Delta.c
+	${LZMA_DIR}/src/LzFind.c
+	${LZMA_DIR}/src/LzmaDec.c
+	${LZMA_DIR}/src/LzmaEnc.c
+	${LZMA_DIR}/src/Sort.c
+)
+target_sources(emucore PRIVATE ${chdr_paths})
+set_source_files_properties(${chdr_paths} PROPERTIES
+	COMPILE_OPTIONS "-w;-I${CHDR_DIR}/include;-I${LZMA_DIR}/include;-I${CORE_DIR}/src/zstd"
+	COMPILE_DEFINITIONS "_7ZIP_ST;Z7_ST;ZSTD_NO_TRACE=1;ZSTD_HAVE_WEAK_SYMBOLS=0"
+)
+target_include_directories(emucore PRIVATE "${CHDR_DIR}/include")
+
 # Catch every missing symbol at link time instead of leaving it to a crash at runtime.
 target_link_options(emucore PRIVATE -Wl,--no-undefined)
 
@@ -311,5 +343,5 @@ target_link_libraries(emucore PRIVATE log z m android aaudio)
 
 # Our own files are C++17 (Mednafen itself stays at the gnu++11 configure.ac asks for); the
 # later -std on the command line wins over CMAKE_CXX_STANDARD's.
-set_source_files_properties(android_host.cpp audio_stream.cpp driver_stubs.cpp jni.cpp
+set_source_files_properties(android_host.cpp audio_stream.cpp cdaccess_chd.cpp disc.cpp driver_stubs.cpp jni.cpp
 	PROPERTIES COMPILE_OPTIONS "-std=gnu++17")

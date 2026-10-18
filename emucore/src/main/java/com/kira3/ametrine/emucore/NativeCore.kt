@@ -9,7 +9,7 @@ import android.view.Surface
  * 1.32.1's "ss" module). Native code finds this class by name to call the callbacks at the
  * bottom, so its name and members must not change (consumer-rules.pro keeps them).
  *
- * The methods this step of the port does not have yet (input, save states, rewind, discs, ...)
+ * The methods this step of the port does not have yet (save states, rewind, disc switching, ...)
  * still answer with their "not available" values, so the frontend screens keep working until
  * they are wired up.
  *
@@ -95,6 +95,14 @@ internal object NativeCore {
     /** Runs as fast as it can while [enabled], at the fast-forward volume. */
     @JvmStatic external fun setFastForward(enabled: Boolean)
 
+    // ---- Discs ----
+
+    /**
+     * The product number in the Saturn disc header of the image at [path] (e.g. "T-4507G"), or null
+     * when it is no Saturn disc or cannot be read. Blocking I/O; needs [initialize] for /saf/ paths.
+     */
+    @JvmStatic external fun getGameSerial(path: String): String?
+
     // ---- Not available yet: these keep the frontend compiling until their task comes up ----
 
     /** Moves the left or [right] stick of the pad in [port] to ([x], [y]), each -1..1 with +y down. Not used until the 3D Control Pad. */
@@ -135,12 +143,6 @@ internal object NativeCore {
 
     /** Writes [value] as [size] (1, 2 or 4) bytes at [address] of main RAM. Blocks. */
     @JvmStatic fun writeMemory(address: Int, size: Int, value: Int): Boolean = false
-
-    /** The disc's serial (e.g. "SLUS-00067"), or null if the core cannot read one from [path]. */
-    @JvmStatic fun getGameSerial(path: String): String? = serialOf(path.substringAfterLast('/'))
-
-    /** A made-up serial from the file name, stable across launches. */
-    private fun serialOf(name: String): String = "STUB-%08X".format(name.hashCode())
 
     /**
      * The index of the disc in the drive (as a string), then the titles of the discs of the loaded

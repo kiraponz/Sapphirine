@@ -9,6 +9,7 @@
 // MEDNAFEN_VERSION.
 #include <mednafen/mednafen.h>
 #include "android_host.h"
+#include "disc.h"
 
 #include <android/log.h>
 #include <android/native_window_jni.h>
@@ -180,4 +181,12 @@ extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setPadBind)(JNIEnv*, jclass, jint 
 {
 	if (port >= 0 && index >= 0)
 		AndroidHost::SetPadBind((uint32_t)port, (uint32_t)index, value > 0.5f);
+}
+
+// ---- Discs ----
+
+extern "C" JNIEXPORT jstring JNICALL NATIVE_CORE(getGameSerial)(JNIEnv* env, jclass, jstring path)
+{
+	const std::string serial = AndroidHost::ReadDiscSerial(ToString(env, path));
+	return serial.empty() ? nullptr : env->NewStringUTF(serial.c_str());
 }

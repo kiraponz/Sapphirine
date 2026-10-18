@@ -8,6 +8,7 @@
 
 #include <jni.h>
 #include <string>
+#include <vector>
 
 struct ANativeWindow;
 
@@ -20,8 +21,9 @@ void SetJavaVM(JavaVM* vm, jclass native_core);
 // folder under [data_dir]). False, with a reason in [error], when it cannot run.
 bool Initialize(const std::string& data_dir, std::string* error);
 
-// Boots (empty [path] = the BIOS alone, no disc) on the calling thread, which becomes the CPU
-// thread, and runs it until the VM shuts down. False, with a reason in [error], when it did not
+// Boots the disc image at [path] (a /saf/ path or a file: .chd, .ccd, .cue or .toc; empty = the
+// BIOS alone, no disc) on the calling thread, which becomes the CPU thread, and runs it until
+// the VM shuts down. False, with a reason in [error], when it did not
 // boot. Save states are not part of this yet.
 bool RunSystem(const std::string& path, const std::string& save_state, std::string* error);
 
@@ -57,6 +59,26 @@ void SetDisplayLayout(bool portrait_top, uint32_t top_margin);
 // The edges of the surface the on-screen messages and overlays keep clear of, in surface pixels.
 // Nothing draws overlays yet.
 void SetOsdSafeArea(uint32_t left, uint32_t top, uint32_t right, uint32_t bottom);
+
+// The app's SAF documents (SafFiles.kt, through NativeCore's callbacks), for the core's /saf/
+// paths. Any thread.
+struct SafFileInfo
+{
+	uint64_t size = 0;
+	int64_t modified_s = 0;
+	bool is_directory = false;
+};
+
+// A new read-only descriptor for the file at [path], or -1.
+int SafOpen(const std::string& path);
+// False when nothing is at [path].
+bool SafStat(const std::string& path, SafFileInfo* info);
+// The names in the folder at [path]; false when it is not one.
+bool SafList(const std::string& path, std::vector<std::string>* names);
+
+// The last error notice Mednafen gave (MDFND_OutputNotice, driver_stubs.cpp) since the previous
+// call, or "". Its loaders report failures this way instead of throwing.
+std::string TakeCoreErrorNotice();
 
 uint32_t GetFrameNumber();
 float GetFps();

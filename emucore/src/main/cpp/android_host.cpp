@@ -1,7 +1,7 @@
 // The CPU thread (the thread RunSystem runs on), the render surface and the settings, ported to
-// the Mednafen "ss" module. Mednafen's own game-loading path (mednafen.cpp's LoadCDGame) always
-// needs a CD image file to open, so the BIOS-only boot here replicates it piece by piece — see
-// RunSystem.
+// the Mednafen "ss" module. Discs load through Mednafen's own CD loading (load_disc); the
+// BIOS-only boot replicates it piece by piece, since that always needs a CD image to open (see
+// load_bios_only).
 
 // types.h (through mednafen.h) #errors if it comes after common C headers that define NULL,
 // EOF or errno values — so mednafen.h goes first, before the jni.h pulled in by android_host.h.
@@ -17,6 +17,7 @@
 
 #include "android_host.h"
 #include "audio_stream.h"
+#include "disc.h"
 
 #include <android/log.h>
 #include <android/native_window.h>
@@ -318,8 +319,9 @@ double drc_factor()
 	return 1.0 + std::clamp(DRC_GAIN * error, -DRC_CLAMP, DRC_CLAMP);
 }
 
-// The (empty, for now) disc list the ss module keeps a pointer into. It must outlive the VM:
-// the module stores the address, not a copy. Named after Mednafen's own CDInterfaces.
+// The empty disc list of the BIOS-only boot, which the ss module keeps a pointer into. It must
+// outlive the VM: the module stores the address, not a copy. A disc boot uses Mednafen's own
+// list (CDInterfaces in mednafen.cpp) instead.
 std::vector<Mednafen::CDInterface*> s_cd_interfaces;
 
 // The app's data directory (Initialize), and with it the BIOS folder the core reads.
@@ -640,6 +642,128 @@ void draw_frame()
 	ANativeWindow_unlockAndPost(window);
 }
 
+// ---------------------------------------------------------------------------
+// Loading: a disc, or the BIOS alone. Either leaves a game MDFNI_CloseGame can take down, or
+// throws with nothing to close but (for the BIOS) the bare descriptor RunSystem's catch drops.
+// ---------------------------------------------------------------------------
+
+// Boots the disc image at [path] (disc.h) through Mednafen's own CD loading, which does
+// everything LoadCDGame does for a file it opened itself, and then closes the tray on it, as
+// Mednafen's driver does after a load with the layout's default (drive 0, "Tray Closed", the
+// first disc).
+void load_disc(const std::string& path)
+{
+	Mednafen::CDInterface* cdif = AndroidHost::OpenDisc(path);
+
+	// The loader reports its failures as error notices rather than exceptions, and takes the
+	// disc with it either way.
+	AndroidHost::TakeCoreErrorNotice();
+	if (!Mednafen::MDFNI_LoadExternalCD("ss", path.c_str(), cdif))
+	{
+		const std::string notice = AndroidHost::TakeCoreErrorNotice();
+		throw std::runtime_error(notice.size() ? notice : "The disc could not be loaded");
+	}
+
+	try
+	{
+		if (!Mednafen::MDFNI_SetMedia(0, 2, 0, 0))
+			throw std::runtime_error("The disc could not be put in the drive");
+	}
+	catch (...)
+	{
+		Mednafen::MDFNI_CloseGame();
+		throw;
+	}
+}
+
+// The boot without a disc. Mednafen's MDFNI_LoadGame (and its LoadCDGame) requires a CD image
+// to open, and their cleanup and module-selection helpers are file-local, so this replicates
+// LoadCDGame's steps with an empty disc list, which the ss module is designed to take (git.h:
+// CDInterfaces "may be == 0 for LoadCD()"). With the region left at ss.region_default (jp), the
+// BIOS boots and reaches its menu, and the drive reads as tray-open, empty.
+void load_bios_only()
+{
+	const Mednafen::MDFNGI* module = nullptr;
+	for (const Mednafen::MDFNGI* m : Mednafen::MDFNSystems)
+	{
+		if (!strcmp(m->shortname, "ss"))
+		{
+			module = m;
+			break;
+		}
+	}
+	if (!module)
+		throw std::runtime_error("The \"ss\" module is not part of this build");
+
+	// The drive layout of a CD system with no discs: what Mednafen's (file-local)
+	// MDFN_LoadCD produces for an empty .m3u — the drive with its three states, and no
+	// media to default to, so the drive starts in state 0, "Tray Open".
+	std::unique_ptr<Mednafen::RMD_Layout> rmd(new Mednafen::RMD_Layout());
+	{
+		Mednafen::RMD_Drive drive;
+
+		drive.Name = "Virtual CD Drive";
+		drive.PossibleStates.push_back(Mednafen::RMD_State({"Tray Open", false, false, true}));
+		drive.PossibleStates.push_back(Mednafen::RMD_State({"Tray Closed (Empty)", false, false, false}));
+		drive.PossibleStates.push_back(Mednafen::RMD_State({"Tray Closed", true, true, false}));
+		drive.CompatibleMedia.push_back(0);
+		drive.MediaMtoPDelay = 2000;
+
+		rmd->Drives.push_back(drive);
+		rmd->DrivesDefaults.push_back(Mednafen::RMD_DriveDefaults({0, 0, 0}));
+		rmd->MediaTypes.push_back(Mednafen::RMD_MediaType({"CD"}));
+	}
+
+	// The game name Mednafen would derive from the disc ("BIOS"), for the module's log
+	// lines and its cheat-file naming.
+	Mednafen::MDFN_SetFileBase(s_data_dir, "BIOS", "");
+	Mednafen::MDFNGameInfo = new Mednafen::MDFNGI(*module);
+	Mednafen::MDFNGameInfo->RMD = rmd.release();
+
+	// The disc-layout MD5 of zero discs (LoadCDGame calls its file-local
+	// CalcDiscsLayoutMD5, which hashes nothing for an empty list).
+	Mednafen::md5_context layout_md5;
+	layout_md5.starts();
+	layout_md5.finish(Mednafen::MDFNGameInfo->MD5);
+
+	// With an empty disc list, the ss module skips all disc reading: the game ID and the
+	// region detection fall out of their loops, and the region stays region_default. A
+	// failure here leaves the module already self-cleaned (LoadCD's contract: it throws only
+	// after its own Cleanup()), and RunSystem's catch drops the descriptor without CloseGame.
+	Mednafen::MDFNGameInfo->LoadCD(&s_cd_interfaces);
+
+	// From here on, MDFNI_CloseGame() is what undoes the load (git.h: CloseGame only after
+	// a successful LoadCD).
+	try
+	{
+		// The module builds its deinterlacer through the setting's change callback, which
+		// only runs once a game is loaded (settings.cpp Set()); putting the setting into
+		// place now creates it. "weave" is Mednafen's default.
+		Mednafen::MDFNI_SetSetting("video.deinterlacer", "weave", false);
+
+		// The drive after load, as the disc changer would leave it for "no disc": tray open,
+		// nothing in it. (CDB_SetDisc's tray_open matches drive state 0.)
+		MDFN_IEN_SS::CDB_SetDisc(true, nullptr);
+
+		// The parts of Mednafen's LoadCommonPost that matter without per-game configuration
+		// files, a custom palette or a debugger. Nothing starts a movie or a rewind here
+		// (MDFNMOV_CheckMovies only lists what exists), and temporal blur stays off
+		// (ss.tblur defaults to "0").
+		Mednafen::MDFNGameInfo->name = "BIOS";
+		Mednafen::MDFN_LoadGameCheats(nullptr);
+		Mednafen::MDFNMP_InstallReadPatches();
+		Mednafen::MDFNI_SetLayerEnableMask(~0ULL);
+		Mednafen::MDFNSS_CheckStates();
+		Mednafen::MDFNMOV_CheckMovies();
+		Mednafen::MDFNSRW_Begin();
+	}
+	catch (...)
+	{
+		Mednafen::MDFNI_CloseGame();
+		throw;
+	}
+}
+
 } // namespace
 
 namespace AndroidHost
@@ -697,11 +821,6 @@ bool Initialize(const std::string& data_dir, std::string* error)
 
 bool RunSystem(const std::string& path, const std::string& save_state, std::string* error)
 {
-	if (path.size())
-	{
-		*error = "Discs are not supported yet";
-		return false;
-	}
 	if (save_state.size())
 	{
 		*error = "Save states are not supported yet";
@@ -727,89 +846,12 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 
 		apply_bios_settings();
 
-		// -------------------------------------------------------------
-		// The boot, without a disc. Mednafen's MDFNI_LoadGame (and its
-		// LoadCDGame) requires a CD image file to open, and their cleanup and
-		// module-selection helpers are file-local, so this replicates
-		// LoadCDGame's steps with an empty disc list, which the ss module is
-		// designed to take (git.h: CDInterfaces "may be == 0 for LoadCD()").
-		// With the region left at ss.region_default (jp), the BIOS boots and
-		// reaches its menu, and the drive reads as tray-open, empty.
-		// -------------------------------------------------------------
-
-		const Mednafen::MDFNGI* module = nullptr;
-		for (const Mednafen::MDFNGI* m : Mednafen::MDFNSystems)
-		{
-			if (!strcmp(m->shortname, "ss"))
-			{
-				module = m;
-				break;
-			}
-		}
-		if (!module)
-			throw std::runtime_error("The \"ss\" module is not part of this build");
-
-		// The drive layout of a CD system with no discs: what Mednafen's (file-local)
-		// MDFN_LoadCD produces for an empty .m3u — the drive with its three states, and no
-		// media to default to, so the drive starts in state 0, "Tray Open".
-		std::unique_ptr<Mednafen::RMD_Layout> rmd(new Mednafen::RMD_Layout());
-		{
-			Mednafen::RMD_Drive drive;
-
-			drive.Name = "Virtual CD Drive";
-			drive.PossibleStates.push_back(Mednafen::RMD_State({"Tray Open", false, false, true}));
-			drive.PossibleStates.push_back(Mednafen::RMD_State({"Tray Closed (Empty)", false, false, false}));
-			drive.PossibleStates.push_back(Mednafen::RMD_State({"Tray Closed", true, true, false}));
-			drive.CompatibleMedia.push_back(0);
-			drive.MediaMtoPDelay = 2000;
-
-			rmd->Drives.push_back(drive);
-			rmd->DrivesDefaults.push_back(Mednafen::RMD_DriveDefaults({0, 0, 0}));
-			rmd->MediaTypes.push_back(Mednafen::RMD_MediaType({"CD"}));
-		}
-
-		// The game name Mednafen would derive from the disc ("BIOS"), for the module's log
-		// lines and its cheat-file naming.
-		Mednafen::MDFN_SetFileBase(s_data_dir, "BIOS", "");
-		Mednafen::MDFNGameInfo = new Mednafen::MDFNGI(*module);
-		Mednafen::MDFNGameInfo->RMD = rmd.release();
-
-		// The disc-layout MD5 of zero discs (LoadCDGame calls its file-local
-		// CalcDiscsLayoutMD5, which hashes nothing for an empty list).
-		Mednafen::md5_context layout_md5;
-		layout_md5.starts();
-		layout_md5.finish(Mednafen::MDFNGameInfo->MD5);
-
-		// With an empty disc list, the ss module skips all disc reading: the game ID and the
-		// region detection fall out of their loops, and the region stays region_default.
-		Mednafen::MDFNGameInfo->LoadCD(&s_cd_interfaces);
-
-		// From here on MDFNI_CloseGame() is safe: CloseGame may only run after a successful
-		// LoadCD (git.h). A failure above this line leaves the module already self-cleaned
-		// (LoadCD's contract: it throws only after its own Cleanup()), so the descriptor
-		// then drops without CloseGame — see the catch.
+		if (path.size())
+			load_disc(path);
+		else
+			load_bios_only();
+		// From here on the game goes down through MDFNI_CloseGame.
 		close_safe = true;
-
-		// The module builds its deinterlacer through the setting's change callback, which
-		// only runs once a game is loaded (settings.cpp Set()); putting the setting into
-		// place now creates it. "weave" is Mednafen's default.
-		Mednafen::MDFNI_SetSetting("video.deinterlacer", "weave", false);
-
-		// The drive after load, as the disc changer would leave it for "no disc": tray open,
-		// nothing in it. (CDB_SetDisc's tray_open matches drive state 0.)
-		MDFN_IEN_SS::CDB_SetDisc(true, nullptr);
-
-		// The parts of Mednafen's LoadCommonPost that matter without per-game configuration
-		// files, a custom palette or a debugger. Nothing starts a movie or a rewind here
-		// (MDFNMOV_CheckMovies only lists what exists), and temporal blur stays off
-		// (ss.tblur defaults to "0").
-		Mednafen::MDFNGameInfo->name = "BIOS";
-		Mednafen::MDFN_LoadGameCheats(nullptr);
-		Mednafen::MDFNMP_InstallReadPatches();
-		Mednafen::MDFNI_SetLayerEnableMask(~0ULL);
-		Mednafen::MDFNSS_CheckStates();
-		Mednafen::MDFNMOV_CheckMovies();
-		Mednafen::MDFNSRW_Begin();
 
 		// Where the driver would connect the input devices (nothing in LoadCommonPost does
 		// it): without this the first Emulate crashes in SMPC_UpdateInput. See the Input
@@ -868,7 +910,7 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 
 		const double rate = frame_rate();
 		const int64_t frame_ns = (int64_t)(1e9 / rate);
-		__android_log_print(ANDROID_LOG_INFO, LOG_TAG, "BIOS boot, pacing to %.3f fps", rate);
+		__android_log_print(ANDROID_LOG_INFO, LOG_TAG, "%s boot, pacing to %.3f fps", path.size() ? "Disc" : "BIOS", rate);
 
 		play_audio();
 
@@ -1144,6 +1186,82 @@ void SetOsdSafeArea(uint32_t left, uint32_t top, uint32_t right, uint32_t bottom
 	(void)top;
 	(void)right;
 	(void)bottom;
+}
+
+// The SAF callbacks clear any exception the Kotlin side let through (it catches everything) and
+// read it as "not there".
+int SafOpen(const std::string& path)
+{
+	JNIEnv* env = get_jni_env();
+	jstring jpath = env->NewStringUTF(path.c_str());
+	const jint fd = env->CallStaticIntMethod(s_native_core, s_saf_open, jpath);
+	env->DeleteLocalRef(jpath);
+	if (env->ExceptionCheck())
+	{
+		env->ExceptionClear();
+		return -1;
+	}
+	return fd;
+}
+
+bool SafStat(const std::string& path, SafFileInfo* info)
+{
+	JNIEnv* env = get_jni_env();
+	jstring jpath = env->NewStringUTF(path.c_str());
+	auto values = static_cast<jlongArray>(env->CallStaticObjectMethod(s_native_core, s_saf_stat, jpath));
+	env->DeleteLocalRef(jpath);
+	if (env->ExceptionCheck())
+	{
+		env->ExceptionClear();
+		return false;
+	}
+	if (!values)
+		return false;
+
+	// [size, modified (seconds), 1 for a folder or 0] (SafFiles.stat).
+	jlong v[3] = {};
+	const bool ok = env->GetArrayLength(values) >= 3;
+	if (ok)
+		env->GetLongArrayRegion(values, 0, 3, v);
+	env->DeleteLocalRef(values);
+	if (!ok)
+		return false;
+
+	info->size = (uint64_t)v[0];
+	info->modified_s = v[1];
+	info->is_directory = v[2] != 0;
+	return true;
+}
+
+bool SafList(const std::string& path, std::vector<std::string>* names)
+{
+	JNIEnv* env = get_jni_env();
+	jstring jpath = env->NewStringUTF(path.c_str());
+	auto entries = static_cast<jobjectArray>(env->CallStaticObjectMethod(s_native_core, s_saf_list, jpath));
+	env->DeleteLocalRef(jpath);
+	if (env->ExceptionCheck())
+	{
+		env->ExceptionClear();
+		return false;
+	}
+	if (!entries)
+		return false;
+
+	// Each entry is "name\tisDir\tsize\tmodified" (SafFiles.list); only the name is wanted.
+	const jsize count = env->GetArrayLength(entries);
+	for (jsize i = 0; i < count; i++)
+	{
+		auto entry = static_cast<jstring>(env->GetObjectArrayElement(entries, i));
+		if (!entry)
+			continue;
+		const char* chars = env->GetStringUTFChars(entry, nullptr);
+		std::string line(chars);
+		env->ReleaseStringUTFChars(entry, chars);
+		env->DeleteLocalRef(entry);
+		names->push_back(line.substr(0, line.find('\t')));
+	}
+	env->DeleteLocalRef(entries);
+	return true;
 }
 
 uint32_t GetFrameNumber()

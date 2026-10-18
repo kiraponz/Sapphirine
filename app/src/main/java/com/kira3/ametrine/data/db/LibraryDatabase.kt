@@ -5,8 +5,11 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-/** Only a cache of what the game folder holds, so a schema change just rebuilds it. */
-@Database(entities = [GameEntity::class], version = 3, exportSchema = false)
+/**
+ * Only a cache of what the game folder holds, so a schema change just rebuilds it. Version 4
+ * drops the serials the stub core made up, so the Saturn core reads them again.
+ */
+@Database(entities = [GameEntity::class], version = 4, exportSchema = false)
 abstract class LibraryDatabase : RoomDatabase() {
     abstract fun gameDao(): GameDao
 

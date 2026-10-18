@@ -14,8 +14,13 @@
 #include <mednafen/driver.h>
 #include <mednafen/netplay-driver.h>
 
+#include "android_host.h"
+
 // types.h requires being included before common C headers (it errors out otherwise).
 #include <android/log.h>
+
+#include <mutex>
+#include <string>
 
 using namespace Mednafen;
 
@@ -23,6 +28,11 @@ namespace
 {
 
 constexpr const char* LOG_TAG = "mednafen-core";
+
+// The last error notice, for AndroidHost::TakeCoreErrorNotice. Notices can come from the CD
+// and VDP2 threads too, hence the lock.
+std::mutex s_error_mutex;
+std::string s_error_notice;
 
 void log(const char* s)
 {
@@ -43,6 +53,18 @@ namespace Mednafen
 void MDFND_OutputNotice(MDFN_NoticeType t, const char* s) noexcept
 {
 	log(s);
+
+	if (t == MDFN_NOTICE_ERROR)
+	{
+		try
+		{
+			std::lock_guard<std::mutex> lock(s_error_mutex);
+			s_error_notice = s;
+		}
+		catch (...)
+		{
+		}
+	}
 }
 
 void MDFND_OutputInfo(const char* s) noexcept
@@ -119,6 +141,14 @@ bool NetplaySendCommand(const uint8 command, const uint32 len, const void* data)
 	return false;
 }
 
+}
+
+std::string AndroidHost::TakeCoreErrorNotice()
+{
+	std::lock_guard<std::mutex> lock(s_error_mutex);
+	std::string ret;
+	ret.swap(s_error_notice);
+	return ret;
 }
 
 // Anything else the link needs from the driver side shows up as an "undefined symbol"
