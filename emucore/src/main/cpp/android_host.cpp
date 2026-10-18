@@ -16,6 +16,7 @@
 #include <mednafen/ss/cdb.h>
 
 #include "android_host.h"
+#include "audio_stream.h"
 
 #include <android/log.h>
 #include <android/native_window.h>
@@ -26,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <dirent.h>
 #include <map>
@@ -38,6 +40,8 @@
 // EmulatedSS is defined at global scope in src/ss/ss.cpp. mednafen.cpp declares it the same
 // way, under #ifdef WANT_SS_EMU.
 extern const Mednafen::MDFNGI EmulatedSS;
+
+using AndroidHost::AudioStream;
 
 namespace
 {
@@ -118,6 +122,201 @@ std::unique_ptr<Mednafen::MDFN_Surface> s_surface;
 std::unique_ptr<uint32_t[]> s_surface_pixels;	// The surface's external pixel buffer.
 std::unique_ptr<int32_t[]> s_line_widths;	// espec.LineWidths, FB_HEIGHT_CAP long.
 Mednafen::EmulateSpecStruct s_espec;
+
+// ---------------------------------------------------------------------------
+// The sound output: the AAudio stream and the settings that steer it. The ring between the
+// CPU thread and the stream's callback lives in AudioStream (audio_stream.h).
+// ---------------------------------------------------------------------------
+
+// The largest output rate the emulation's sound buffer is sized for. Phones hand out their
+// native rates (48 kHz on current ones, 96 kHz over USB at most); the buffer is big enough for
+// a full frame at this rate with margin, whatever the device actually gave us.
+constexpr int32_t MAX_SOUND_RATE = 96000;
+
+// The app's Audio settings (SetSetting, section "Audio"; CoreKeys.kt). Volumes arrive as
+// percentages (the app clamps to 0..200), the buffer target as milliseconds (10..500). They are
+// read by every pushed frame, so a running VM takes them without a commit.
+std::atomic<int32_t> s_volume_percent{100};
+std::atomic<int32_t> s_fast_forward_volume_percent{100};
+std::atomic<bool> s_output_muted{false};
+std::atomic<int32_t> s_buffer_ms{100};
+
+// True while the VM runs without pacing (NativeCore.setFastForward, from
+// EmulatorCore.setFastForward); the frame loop reads it at every frame.
+std::atomic<bool> s_fast_forward{false};
+
+// The once-per-boots audio output, created in RunSystem and closed at the teardown (or the
+// moment its stream is beyond saving). Producer side (push) is the CPU thread.
+std::unique_ptr<AudioStream> s_audio;
+
+// The int16 buffer the emulation renders a frame's sound into (espec.SoundBuf), and its size in
+// frames. Owned by the CPU thread.
+std::unique_ptr<int16_t[]> s_sound_buffer;
+int32_t s_sound_buffer_frames = 0;
+
+// The frame loop's to-do, set by RequestPause's resume side and consumed at the next frame
+// boundary: flush the ring, prefill silence up to the target and play again.
+std::atomic<bool> s_audio_play_pending{false};
+
+// The rate control's current factor as fps*2^16-style fixed point (65536 = 1.0), for the log.
+std::atomic<int64_t> s_drc_scale{65536};
+
+// The rate-control constants (their formula and reasoning sit in the frame loop's comment):
+// per frame, the pacing period is scaled by factor = 1 + gain × (fill − target) / target,
+// with gain 1/100 and the factor clamped at ±0.5 %.
+constexpr double DRC_GAIN = 0.01;
+constexpr double DRC_CLAMP = 0.005;
+
+// The ring's fill the rate control holds: the app's BufferMS, in frames of the device's rate.
+int32_t target_fill_frames(int32_t rate)
+{
+	return (int32_t)std::min<int64_t>(s_buffer_ms.load(std::memory_order_relaxed) * (int64_t)rate / 1000,
+		INT32_MAX);
+}
+
+// The Q8 gain the pushed samples get: the output volume, or the fast-forward one while
+// fast-forwarding, and silence (0) when muted.
+int32_t sound_gain_q8()
+{
+	if (s_output_muted.load(std::memory_order_relaxed))
+		return 0;
+
+	const bool fast_forward = s_fast_forward.load(std::memory_order_relaxed);
+	const int32_t percent = (fast_forward
+		? s_fast_forward_volume_percent
+		: s_volume_percent).load(std::memory_order_relaxed);
+
+	return std::clamp(percent, 0, 200) * 256 / 100;
+}
+
+// Pushes espec's frames that nothing has given the audio output yet —
+// [SoundBufSize_DriverProcessed, SoundBufSize), the un-pushed tail Mednafen's own bookkeeping
+// accounts for exactly — and marks them consumed. The MDFND_MidSync hook lands here at the mid-
+// sync point inside MDFNI_Emulate, and the frame loop right after it for the frames produced
+// after the sync; a frame's sound therefore goes out exactly once (SoundBufSize restarts from 0
+// in each MDFNI_Emulate, Mednafen.cpp asserts the buffer over it itself).
+void push_pending_sound(Mednafen::EmulateSpecStruct* espec)
+{
+	if (!espec->SoundBuf)
+	{
+		// The driver's sound-disabled configuration: keep the bookkeeping in step so a stream
+		// that comes back (a disconnect reopen) finds counters that agree.
+		espec->SoundBufSize_DriverProcessed = espec->SoundBufSize;
+		return;
+	}
+
+	const int32_t consumed = espec->SoundBufSize_DriverProcessed;
+	const int32_t produced = espec->SoundBufSize;
+
+	// A sign flip below zero would mean a rewind swallowed the buffer — not wired up — but
+	// clamp rather than read half a frame of garbage in front of SoundBuf.
+	if (produced < consumed)
+	{
+		espec->SoundBufSize_DriverProcessed = produced;
+		return;
+	}
+
+	if (AudioStream* audio = s_audio.get(); audio && produced > consumed)
+		audio->push(espec->SoundBuf + (size_t)consumed * 2, produced - consumed, sound_gain_q8());
+
+	espec->SoundBufSize_DriverProcessed = produced;
+}
+
+// The sound buffer espec renders into: room for one frame at MAX_SOUND_RATE, doubled for the
+// slack of a long (PAL, interlaced) frame and the resampler's rounding.
+constexpr int32_t SOUND_BUFFER_FRAMES = MAX_SOUND_RATE / 50 * 2;
+
+// Points espec at the stream's rate and the sound buffer, or turns the sound off (MDFNI_Emulate
+// asserts that SoundBuf, SoundRate and SoundBufMaxSize are all set or all zero).
+void set_espec_sound(int32_t rate)
+{
+	if (rate > 0 && rate <= MAX_SOUND_RATE)
+	{
+		if (!s_sound_buffer)
+			s_sound_buffer.reset(new int16_t[(size_t)SOUND_BUFFER_FRAMES * 2]);
+		s_espec.SoundRate = rate;
+		s_espec.SoundBuf = s_sound_buffer.get();
+		s_espec.SoundBufMaxSize = SOUND_BUFFER_FRAMES;
+	}
+	else
+	{
+		s_espec.SoundRate = 0;
+		s_espec.SoundBuf = nullptr;
+		s_espec.SoundBufMaxSize = 0;
+	}
+}
+
+// Starts the output from silence: the ring emptied and prefilled up to the target, so the
+// callback drains silence while the emulation catches up instead of starting on an underrun.
+// Only with the callback stopped (before the first start, after pause_audio()).
+void play_audio()
+{
+	if (!s_audio)
+		return;
+
+	s_audio->flushAndPrefill(target_fill_frames(s_audio->rate()));
+	if (!s_audio->start())
+		__android_log_print(ANDROID_LOG_WARN, LOG_TAG, "AAudio requestStart failed");
+}
+
+void pause_audio()
+{
+	if (s_audio)
+		s_audio->pause();
+}
+
+// Opens the output and points espec at it. Without a stream the VM runs silent.
+void open_audio()
+{
+	s_audio.reset(new AudioStream());
+
+	std::string error;
+	if (!s_audio->open(&error))
+	{
+		__android_log_print(ANDROID_LOG_WARN, LOG_TAG, "No sound: %s", error.c_str());
+		s_audio.reset();
+		set_espec_sound(0);
+		return;
+	}
+
+	__android_log_print(ANDROID_LOG_INFO, LOG_TAG, "Sound at %d Hz", s_audio->rate());
+	set_espec_sound(s_audio->rate());
+}
+
+// A stream the error callback gave up on (headphones out, a Bluetooth switch) is reopened here,
+// on the CPU thread, as AAudio wants. If the new device's rate differs, espec follows it and the
+// ss module rebuilds its resampler at the next frame.
+void reopen_audio_if_lost()
+{
+	if (!s_audio || !s_audio->takeError())
+		return;
+
+	s_audio->close();
+	open_audio();
+	play_audio();
+}
+
+// The pacing period's rate-control factor. The audio device's clock and CLOCK_MONOTONIC drift
+// apart by up to a few hundredths of a percent, so a fixed period slowly drains or floods the
+// ring (the drained case is the crackle). Each frame the period is scaled by
+//
+//   factor = 1 + DRC_GAIN × (fill − target) / target, clamped to 1 ± DRC_CLAMP
+//
+// so a fuller ring slows the emulation down a little and an emptier one speeds it up. With the
+// gain at 1 %, the fill settles within a few percent of the target for any realistic drift, and
+// the ±0.5 % clamp keeps the change of pitch inaudible (as RetroArch's dynamic rate control).
+double drc_factor()
+{
+	if (!s_audio)
+		return 1.0;
+
+	const double target = target_fill_frames(s_audio->rate());
+	if (target <= 0)
+		return 1.0;
+
+	const double error = (s_audio->fillFrames() - target) / target;
+	return 1.0 + std::clamp(DRC_GAIN * error, -DRC_CLAMP, DRC_CLAMP);
+}
 
 // The (empty, for now) disc list the ss module keeps a pointer into. It must outlive the VM:
 // the module stores the address, not a copy. Named after Mednafen's own CDInterfaces.
@@ -591,9 +790,8 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 
 		// -------------------------------------------------------------
 		// The frame loop, on this thread: pause-aware, paced to the frame
-		// rate, drawing under the window lock. No audio: the espec runs with
-		// a null sound buffer and 0 rate (asserted legal in MDFNI_Emulate, and
-		// SOUND_FlushOutput returns 0 then), and no input (nothing to update).
+		// rate (nudged by the audio rate control), drawing under the window
+		// lock, and feeding the audio ring. No input yet.
 		// -------------------------------------------------------------
 
 		s_surface_pixels.reset(new uint32_t[FB_WIDTH * FB_HEIGHT_CAP]);
@@ -611,23 +809,25 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		s_espec = Mednafen::EmulateSpecStruct{};
 		s_espec.surface = s_surface.get();
 		s_espec.LineWidths = s_line_widths.get();
-		s_espec.SoundRate = 0;
-		s_espec.SoundBuf = nullptr;
-		s_espec.SoundBufMaxSize = 0;
 
 		// The boot is on. Whatever way this function leaves from here — the normal shutdown
 		// below, or an exception out of the frame loop — the run is over, and the next boot
 		// must find no active system (a mid-run failure once leaked a stuck one): the VM's
-		// flags and the last fps reset here, on every exit.
+		// flags and the last fps reset here, on every exit, and the sound stops (closing the
+		// stream waits for its callback, so the ring and the buffer go after it).
 		struct RunEndGuard
 		{
 			~RunEndGuard()
 			{
+				s_audio.reset();
+				s_sound_buffer.reset();
 				s_active.store(false);
 				s_stop.store(false);
 				s_fps.store(0);
 			}
 		} run_end_guard;
+
+		open_audio();
 
 		s_active.store(true);
 		s_stop.store(false);
@@ -638,23 +838,62 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		const int64_t frame_ns = (int64_t)(1e9 / rate);
 		__android_log_print(ANDROID_LOG_INFO, LOG_TAG, "BIOS boot, pacing to %.3f fps", rate);
 
+		play_audio();
+
 		int64_t deadline = now_ns() + frame_ns;
 		int64_t fps_since = now_ns();
 		int64_t fps_frames = 0;
 		int64_t emu_ns_total = 0;
+		bool fast_forward = false;
 
 		while (!s_stop.load())
 		{
+			// Paused: the sound stops before the wait, and starts again from a fresh prefill
+			// after it, so a resume neither replays stale sound nor starts on an underrun.
 			{
 				std::unique_lock<std::mutex> lock(s_vm_mutex);
-				s_vm_cond.wait(lock, []() { return s_stop.load() || !s_paused; });
+				if (s_paused && !s_stop.load())
+				{
+					lock.unlock();
+					pause_audio();
+					lock.lock();
+					s_vm_cond.wait(lock, []() { return s_stop.load() || !s_paused; });
+					if (!s_stop.load())
+					{
+						lock.unlock();
+						play_audio();
+						deadline = now_ns() + frame_ns;
+					}
+				}
 			}
 			if (s_stop.load())
 				break;
 
+			reopen_audio_if_lost();
+
+			// Leaving fast-forward: the ring is as full as the drops let it get, far above the
+			// target, and the rate control's 0.5 % would take minutes to drain it. Restart it
+			// from the prefill instead.
+			const bool ff = s_fast_forward.load(std::memory_order_relaxed);
+			if (fast_forward && !ff)
+			{
+				pause_audio();
+				play_audio();
+				deadline = now_ns() + frame_ns;
+			}
+			fast_forward = ff;
+
+			// Each MDFNI_Emulate restarts SoundBufSize from 0; the driver-side counters are
+			// ours to restart (Mednafen's own driver uses a fresh espec per frame).
+			s_espec.SoundBufSize_DriverProcessed = 0;
+			s_espec.MasterCycles_DriverProcessed = 0;
+
 			const int64_t t0 = now_ns();
 			Mednafen::MDFNI_Emulate(&s_espec);
 			const int64_t t1 = now_ns();
+
+			// What the mid-frame syncs (MDFND_MidSync) did not hand over yet.
+			push_pending_sound(&s_espec);
 
 			s_frame_number.fetch_add(1);
 			fps_frames++;
@@ -664,29 +903,50 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 
 			// Pace against an absolute deadline, so a late frame does not push the next one.
 			// If a whole frame or more was lost (a surface swap, a hiccup), jump the deadline
-			// instead of running a burst of frames with no sleep to catch up.
-			deadline += frame_ns;
+			// instead of running a burst of frames with no sleep to catch up. Fast-forward
+			// does not sleep at all; the ring drops what does not fit.
+			const double drc = fast_forward ? 1.0 : drc_factor();
+			s_drc_scale.store((int64_t)(drc * 65536.0), std::memory_order_relaxed);
 			const int64_t now = now_ns();
-			if (deadline - now < -frame_ns)
-				deadline = now + frame_ns;
+			if (fast_forward)
+				deadline = now;
 			else
-				sleep_until_ns(deadline);
+			{
+				deadline += (int64_t)(frame_ns * drc);
+				if (deadline - now < -frame_ns)
+					deadline = now + frame_ns;
+				else
+					sleep_until_ns(deadline);
+			}
 
-			// The fps over the last full second, and how long Emulate actually takes.
+			// Once a second: the fps, how long Emulate takes, and the sound's health — the
+			// ring's fill against the target, under- and overruns, and the rate control.
 			const int64_t ct = now_ns();
 			if (ct - fps_since >= 1000000000ll)
 			{
 				double fps = fps_frames * 1e9 / (ct - fps_since);
 				double avg_ms = fps_frames ? (emu_ns_total / 1e6) / fps_frames : 0.0;
 				s_fps.store((int64_t)(fps * 65536.0));
+
+				int64_t under = 0, over = 0;
+				double fill_ms = 0;
+				if (s_audio)
+				{
+					s_audio->takeStatistics(&under, &over);
+					fill_ms = s_audio->fillFrames() * 1000.0 / s_audio->rate();
+				}
+				const double drc_percent = (s_drc_scale.load(std::memory_order_relaxed) / 65536.0 - 1.0) * 100.0;
+
 				__android_log_print(ANDROID_LOG_INFO, LOG_TAG,
-					"fps=%.2f avg MDFNI_Emulate=%.2f ms", fps, avg_ms);
+					"fps=%.2f emu=%.2fms audio=%.0fms under=%lld over=%lld drc=%+.3f%%",
+					fps, avg_ms, fill_ms, (long long)under, (long long)over, drc_percent);
 				fps_frames = 0;
 				emu_ns_total = 0;
 				fps_since = ct;
 			}
 		}
 
+		s_audio.reset();
 		Mednafen::MDFNI_CloseGame();
 		close_safe = false;
 	}
@@ -759,10 +1019,29 @@ void RequestShutdown()
 	s_vm_cond.notify_all();
 }
 
+void SetFastForward(bool enabled)
+{
+	// The frame loop picks it up at the next frame (and restarts the sound when it ends).
+	s_fast_forward.store(enabled, std::memory_order_relaxed);
+}
+
 void SetSetting(const char* section, const char* key, const char* value)
 {
-	// The app sends PS1-era keys that the Saturn core has no use for; only the BIOS path
-	// section means anything now.
+	// The app sends PS1-era keys that the Saturn core has no use for; only the BIOS paths and
+	// the Audio section's volumes and buffer size mean anything now.
+	if (!strcmp(section, "Audio"))
+	{
+		if (!strcmp(key, "OutputVolume"))
+			s_volume_percent.store(std::clamp(atoi(value), 0, 200), std::memory_order_relaxed);
+		else if (!strcmp(key, "FastForwardVolume"))
+			s_fast_forward_volume_percent.store(std::clamp(atoi(value), 0, 200), std::memory_order_relaxed);
+		else if (!strcmp(key, "OutputMuted"))
+			s_output_muted.store(!strcmp(value, "true"), std::memory_order_relaxed);
+		else if (!strcmp(key, "BufferMS"))
+			s_buffer_ms.store(std::clamp(atoi(value), 10, 500), std::memory_order_relaxed);
+		return;
+	}
+
 	if (strcmp(section, "BIOS"))
 		return;
 
@@ -835,3 +1114,18 @@ float GetFps()
 }
 
 } // namespace AndroidHost
+
+namespace Mednafen
+{
+
+// The ss module syncs several times a frame (ss.cpp's MidSync) and flushes its sound into
+// espec at each; handing it to the ring right away keeps the ring's fill smooth within the
+// frame instead of arriving in one lump at the end of it. On the CPU thread, inside
+// MDFNI_Emulate.
+void MDFND_MidSync(EmulateSpecStruct* espec, const unsigned flags)
+{
+	(void)flags;
+	push_pending_sound(espec);
+}
+
+} // namespace Mednafen

@@ -168,3 +168,10 @@ extern "C" JNIEXPORT jlong JNICALL NATIVE_CORE(getFrameNumber)(JNIEnv*, jclass)
 {
 	return AndroidHost::GetFrameNumber();
 }
+
+// ---- Input and speed ----
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setFastForward)(JNIEnv*, jclass, jboolean enabled)
+{
+	AndroidHost::SetFastForward(enabled == JNI_TRUE);
+}

@@ -31,9 +31,13 @@ bool HasActiveSystem();
 void RequestPause(bool paused);
 void RequestShutdown();
 
+// Runs without pacing while [enabled], at the fast-forward volume.
+void SetFastForward(bool enabled);
+
 // Writes one value to the core's base settings. The app sends PS1-era keys the Saturn core has
 // no use for yet: the BIOS path section ("BIOS"/PathNTSCJ|PathNTSCU|PathPAL) is kept for the
-// next boot, everything else is ignored. See android_host.cpp.
+// next boot, the "Audio" section's volumes and buffer size apply at once, and everything else
+// is ignored. See android_host.cpp.
 void SetSetting(const char* section, const char* key, const char* value);
 void CommitSettings();
 

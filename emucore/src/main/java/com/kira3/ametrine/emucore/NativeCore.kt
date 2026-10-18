@@ -95,7 +95,8 @@ internal object NativeCore {
     /** Moves the left or [right] stick of the pad in [port] to ([x], [y]), each -1..1 with +y down. */
     @JvmStatic fun setPadStick(port: Int, right: Boolean, x: Float, y: Float) = Unit
 
-    @JvmStatic fun setFastForward(enabled: Boolean) = Unit
+    /** Runs as fast as it can while [enabled], at the fast-forward volume. */
+    @JvmStatic external fun setFastForward(enabled: Boolean)
 
     /** Saves the running game to [path]. Blocks. Null when it did, or why not. */
     @JvmStatic fun saveState(path: String): String? = "Not available yet"

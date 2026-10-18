@@ -261,6 +261,7 @@ list(TRANSFORM mednafen_sources PREPEND "${CORE_DIR}/src/")
 # sources, all under <core>/src.
 add_library(emucore SHARED
 	android_host.cpp
+	audio_stream.cpp
 	driver_stubs.cpp
 	jni.cpp
 	${mednafen_sources}
@@ -303,7 +304,12 @@ set_source_files_properties(${mpcdec_paths} PROPERTIES
 # Catch every missing symbol at link time instead of leaving it to a crash at runtime.
 target_link_options(emucore PRIVATE -Wl,--no-undefined)
 
-# Android's bundled zlib (png.cpp, GZFileStream.cpp, testsexp.cpp, ...), libm, and libandroid
-# (ANativeWindow, in android_host.cpp / jni.cpp); log for the core's own output. Threads are
-# part of bionic.
-target_link_libraries(emucore PRIVATE log z m android)
+# Android's bundled zlib (png.cpp, GZFileStream.cpp, testsexp.cpp, ...), libm, libandroid
+# (ANativeWindow, in android_host.cpp / jni.cpp) and libaaudio (audio_stream.cpp); log for the
+# core's own output. Threads are part of bionic.
+target_link_libraries(emucore PRIVATE log z m android aaudio)
+
+# Our own files are C++17 (Mednafen itself stays at the gnu++11 configure.ac asks for); the
+# later -std on the command line wins over CMAKE_CXX_STANDARD's.
+set_source_files_properties(android_host.cpp audio_stream.cpp driver_stubs.cpp jni.cpp
+	PROPERTIES COMPILE_OPTIONS "-std=gnu++17")
