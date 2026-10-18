@@ -927,19 +927,32 @@ void connect_input_devices()
 // The frame rate and the frame pacing.
 // ---------------------------------------------------------------------------
 
-// The frame rate, computed the way Saturn.emu's makeFrameRate does it for the Saturn's VDP2
-// (NTSC, non-interlaced):
+// The frame rate the pacing starts from: the Saturn's VDP2 in NTSC, non-interlaced, as Saturn.emu's
+// makeFrameRate computes it (right for the BIOS screen):
 //
 //   vdpClock = 1746818181.8181818181 / 61 / 4
 //   rate = vdpClock / (454.99 * 263) ≈ 59.83 Hz
 //
-// PAL (1734687500 Hz clock, 313 lines) and interlaced (262.5 lines) rates need the emulated PAL
-// flag and the interlace mode, which src/ss/vdp2.cpp keeps to itself; until they can be read,
-// this is the NTSC non-interlaced rate — right for the BIOS screen.
+// PAL (1734687500 Hz clock, 313 lines, 50 Hz) and interlaced (262.5 lines, 59.94 Hz) games run at
+// other rates, which src/ss/vdp2.cpp keeps to itself; the frame loop measures them from the
+// master cycles each frame takes (measure_frame_rate) and moves the pacing to them.
 double frame_rate()
 {
 	const double vdp_clock = 1746818181.8181818181 / 61.0 / 4.0;
 	return vdp_clock / (454.99 * 263.0);
+}
+
+// The frame rate the last [frames] frames ran at, from the [master_cycles] they took together
+// (EmulateSpecStruct::MasterCycles, in the module's MasterClock units; [master_hz] is that
+// clock): the module's own timing, PAL or NTSC, interlaced or not, with no way to ask it. 0 when
+// the numbers make no sense.
+double measure_frame_rate(double master_hz, int64_t master_cycles, int64_t frames)
+{
+	if (master_cycles <= 0 || frames <= 0)
+		return 0.0;
+
+	const double rate = master_hz * (double)frames / (double)master_cycles;
+	return (rate >= 40.0 && rate <= 75.0) ? rate : 0.0;
 }
 
 int64_t now_ns()
@@ -1836,8 +1849,15 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		s_paused = false;
 		on_vm_paused_changed(false);
 
-		const double rate = frame_rate();
-		const int64_t frame_ns = (int64_t)(1e9 / rate);
+		double rate = frame_rate();
+		int64_t frame_ns = (int64_t)(1e9 / rate);
+		// The game's own frame rate is measured over windows of frames (the first one short, so a
+		// PAL game does not run a second at the NTSC pace): the module's master clock and the
+		// master cycles its frames take.
+		const double master_hz = (double)(Mednafen::MDFNGameInfo->MasterClock / MDFN_MASTERCLOCK_FIXED(1));
+		int64_t measured_cycles = 0;
+		int64_t measured_frames = 0;
+		int64_t measure_window = 30;
 		__android_log_print(ANDROID_LOG_INFO, LOG_TAG, "%s boot, pacing to %.3f fps", path.size() ? "Disc" : "BIOS", rate);
 
 		play_audio();
@@ -1936,6 +1956,24 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 			s_frame_number.fetch_add(1);
 			fps_frames++;
 			emu_ns_total += t1 - t0;
+
+			measured_cycles += s_espec.MasterCycles;
+			if (++measured_frames >= measure_window)
+			{
+				const double measured = measure_frame_rate(master_hz, measured_cycles, measured_frames);
+				// A change of 0.1 % or more moves the pacing (fast-forward and the rewind
+				// interval follow); anything less is noise from the interlaced fields.
+				if (measured > 0.0 && std::abs(measured / rate - 1.0) >= 0.001)
+				{
+					__android_log_print(ANDROID_LOG_INFO, LOG_TAG, "frame rate %.3f -> %.3f fps", rate, measured);
+					rate = measured;
+					frame_ns = (int64_t)(1e9 / rate);
+					deadline = now_ns() + frame_ns;
+				}
+				measured_cycles = 0;
+				measured_frames = 0;
+				measure_window = 120;
+			}
 
 			draw_frame();
 
