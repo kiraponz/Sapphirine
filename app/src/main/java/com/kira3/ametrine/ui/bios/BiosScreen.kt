@@ -47,6 +47,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kira3.ametrine.R
 import com.kira3.ametrine.data.Bios
+import com.kira3.ametrine.data.CartRom
 import com.kira3.ametrine.emucore.BiosRegion
 import com.kira3.ametrine.ui.settings.BackButton
 import com.kira3.ametrine.ui.settings.listPadding
@@ -73,6 +74,21 @@ fun BiosScreen(
 
     val pickBios = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(viewModel::onBiosPicked)
+    }
+
+    var pickingCart by remember { mutableStateOf<CartRom?>(null) }
+    val pickCart = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val rom = pickingCart
+        pickingCart = null
+        if (uri != null && rom != null) viewModel.onCartPicked(rom, uri)
+    }
+
+    val invalidCartText = stringResource(R.string.cart_rom_invalid)
+    LaunchedEffect(state.invalidCart) {
+        if (state.invalidCart) {
+            snackbarHostState.showSnackbar(invalidCartText)
+            viewModel.onInvalidCartShown()
+        }
     }
 
     val invalidText = stringResource(R.string.bios_invalid)
@@ -141,6 +157,43 @@ fun BiosScreen(
                     Text(bios.fileName, maxLines = 1)
                 }
             }
+            item(key = "carts_header") {
+                Text(
+                    stringResource(R.string.cart_rom_title),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.animateItem().padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 8.dp),
+                )
+            }
+            itemsIndexed(CartRom.entries, key = { _, rom -> "cart_${rom.fileName}" }) { index, rom ->
+                val has = rom in state.carts
+                SegmentedListItem(
+                    shapes = segmentedShapes(index, CartRom.entries.size),
+                    colors = settingsListColors(),
+                    modifier = Modifier.animateItem(),
+                    onClick = { if (!has) { pickingCart = rom; pickCart.launch(arrayOf("*/*")) } },
+                    trailingContent = {
+                        if (has) {
+                            IconButton(onClick = { viewModel.deleteCart(rom) }) {
+                                Icon(Icons.Filled.Delete, contentDescription = stringResource(R.string.bios_delete))
+                            }
+                        }
+                    },
+                    supportingContent = {
+                        Text(stringResource(if (has) R.string.cart_rom_added else R.string.cart_rom_not_added))
+                    },
+                ) {
+                    Text(stringResource(rom.titleRes), maxLines = 1)
+                }
+            }
+            item(key = "carts_about") {
+                Text(
+                    stringResource(R.string.cart_rom_about),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.animateItem().padding(start = 16.dp, end = 16.dp, top = 16.dp),
+                )
+            }
             item(key = "about") {
                 Text(
                     stringResource(R.string.bios_about),
@@ -177,6 +230,12 @@ private fun Bios.details(): String {
     val region = stringResource(metadata.region.labelRes)
     return if (metadata.region == BiosRegion.Unknown) region else "$region · ${metadata.description}"
 }
+
+private val CartRom.titleRes: Int
+    get() = when (this) {
+        CartRom.KingOfFighters95 -> R.string.cart_rom_kof95
+        CartRom.Ultraman -> R.string.cart_rom_ultraman
+    }
 
 private val BiosRegion.labelRes: Int
     get() = when (this) {

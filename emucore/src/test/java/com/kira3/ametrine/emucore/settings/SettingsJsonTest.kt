@@ -120,6 +120,26 @@ class SettingsJsonTest {
         for (path in SettingsEffects.appliesOnNextBoot) assertTrue(path, path in all)
     }
 
+    @Test
+    fun padTypeFallsBackOnAnUnknownValue() {
+        val stored = SettingsJson.parse("""{"console": {"padType": "3d"}}""")
+        assertEquals("3d", SettingsJson.decode(stored).console.padType)
+        val bad = SettingsJson.parse("""{"console": {"padType": "analog"}}""")
+        assertEquals("standard", SettingsJson.decode(bad).console.padType)
+    }
+
+    @Test
+    fun padTypeReachesTheCoreNotARunningGame() {
+        // Sent as Input/PadType before the boot; under a running game it keeps what it booted with.
+        val keys = CoreKeys.of(EmulatorSettings()).associateBy { it.id }
+        assertEquals("standard", keys.getValue("Input/PadType").value)
+        assertEquals("Input/PadType", keys.getValue("Input/PadType").id)
+
+        val keys3d = CoreKeys.of(EmulatorSettings(console = ConsoleSettings(padType = "3d"))).associateBy { it.id }
+        assertEquals(setOf("console.padType"), keys3d.getValue("Input/PadType").fields)
+        assertTrue("console.padType" in SettingsEffects.appliesOnNextBoot)
+    }
+
     private fun leafPaths(obj: kotlinx.serialization.json.JsonObject, prefix: String = ""): Set<String> = buildSet {
         for ((key, value) in obj) {
             if (value is kotlinx.serialization.json.JsonObject) addAll(leafPaths(value, "$prefix$key."))

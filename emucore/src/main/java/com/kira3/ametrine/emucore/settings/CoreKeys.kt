@@ -16,7 +16,8 @@ internal data class CoreKey(
 /**
  * Maps [EmulatorSettings] to the core's settings keys (NativeCore.setSetting, which
  * android_host.cpp reads). The single place that knows key names. Section "Core" holds
- * Mednafen's own settings by name; "BIOS", "Display", "Main" and "Audio" are the host's.
+ * Mednafen's own settings by name; "BIOS", "Display", "Main", "Audio" and "Input" are the
+ * host's.
  */
 internal object CoreKeys {
     fun of(s: EmulatorSettings): List<CoreKey> = KeyWriter().apply { write(s) }.keys
@@ -77,6 +78,7 @@ internal object CoreKeys {
             // A disc that names no region the console knows boots as a Japanese one.
             put("Core", "ss.region_default", if (auto) "jp" else region, setOf(g.path(::region)))
             g.string(::cart, "Core", "ss.cart")
+            g.string(::padType, "Input", "PadType")
             put("Core", "ss.smpc.autortc", if (autoRtc) "1" else "0", setOf(g.path(::autoRtc)))
             g.string(::language, "Core", "ss.smpc.autortc.lang")
         }

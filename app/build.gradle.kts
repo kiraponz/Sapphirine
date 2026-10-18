@@ -24,7 +24,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.kira3.emufrontend"
+        applicationId = "com.kira3.sapphirine"
         minSdk = 29
         targetSdk = 37
         versionCode = 1

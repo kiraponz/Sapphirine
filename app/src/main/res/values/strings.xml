@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">EmuFrontend</string>
+    <string name="app_name">Sapphirine</string>
 
     <!-- Common -->
     <string name="navigate_back">Back</string>
@@ -29,6 +29,13 @@
     <string name="bios_delete_title">Delete %1$s?</string>
     <string name="bios_delete_text">The file is removed from the app. Games set to use it go back to the BIOS for their region.</string>
     <string name="bios_about">Add the BIOS dumps from your own Saturn. The Saturn has two: one for Japan, and one for North America and Europe. Each game starts with the BIOS for its region, so one of each is best; with only one, games of the other region try that one. A game\'s settings can pick a BIOS of their own.</string>
+    <string name="cart_rom_title">ROM cartridges</string>
+    <string name="cart_rom_kof95">The King of Fighters \'95</string>
+    <string name="cart_rom_ultraman">Ultraman: Hikari no Kyojin Densetsu</string>
+    <string name="cart_rom_added">Added</string>
+    <string name="cart_rom_not_added">Not added · tap to add the 2 MiB ROM image</string>
+    <string name="cart_rom_invalid">This file is not a 2 MiB ROM image</string>
+    <string name="cart_rom_about">Two games came with a ROM cartridge for the expansion slot: The King of Fighters \'95 and Ultraman. They start only with the cartridge\'s ROM added here, dumped from your own cartridge.</string>
     <string name="bios_region_japan">Japan</string>
     <string name="bios_region_na_eu">North America and Europe</string>
     <string name="bios_region_unknown">Unknown BIOS</string>
@@ -52,7 +59,7 @@
     <string name="rewind_ago_seconds">%1$d s ago</string>
     <string name="rewind_ago_minutes">%1$d min ago</string>
     <string name="rewind_failed">Could not rewind</string>
-    <string name="emulation_screenshot_saved">Screenshot saved to Pictures/EmuFrontend</string>
+    <string name="emulation_screenshot_saved">Screenshot saved to Pictures/Sapphirine</string>
     <string name="emulation_screenshot_failed">Could not save the screenshot</string>
 
     <!-- In-game menu -->
@@ -598,20 +605,20 @@
     <string name="settings_about_summary">Version, source code and licenses</string>
     <string name="about_title">About</string>
     <string name="about_version">Version %1$s</string>
-    <string name="about_description">An emulator frontend for Android, with a stub emulation core to put a real one in place of.</string>
-    <string name="about_bios_note">Games need a BIOS dumped from your own console. EmuFrontend does not include any BIOS or games.</string>
+    <string name="about_description">A Sega Saturn emulator for Android.</string>
+    <string name="about_bios_note">Games need a BIOS dumped from your own console. Sapphirine does not include any BIOS or games.</string>
     <string name="about_source">Source code</string>
     <string name="about_core">Emulation core</string>
-    <string name="about_core_summary">Stub core (%1$s)</string>
+    <string name="about_core_summary">Mednafen %1$s</string>
     <string name="about_license">License</string>
     <string name="about_license_summary">GNU General Public License, version 3</string>
     <string name="about_licenses">Open source licenses</string>
     <string name="about_licenses_summary">The libraries, fonts and data this app includes</string>
     <string name="about_legal">This program comes with ABSOLUTELY NO WARRANTY. It is free software, and you are welcome to redistribute it under the terms of the GNU General Public License, version 3.</string>
-    <string name="about_trademark">EmuFrontend is not affiliated with any console maker.</string>
+    <string name="about_trademark">Sapphirine is not affiliated with any console maker.</string>
     <string name="about_no_browser">No app can open this link</string>
-    <string name="about_source_url" translatable="false">https://github.com/kiraponz/EmuFrontend</string>
-    <string name="about_core_url" translatable="false">https://github.com/kiraponz/EmuFrontend</string>
+    <string name="about_source_url" translatable="false">https://github.com/kiraponz/Sapphirine</string>
+    <string name="about_core_url" translatable="false">https://github.com/kiraponz/sapphirine-core</string>
     <string name="licenses_title">Open source licenses</string>
     <string name="licenses_group_core">Emulation core</string>
     <string name="licenses_group_native">Native libraries</string>
@@ -665,4 +672,12 @@
     <string name="settings_region_summary">Auto follows the disc</string>
     <string name="settings_opt_region_japan">Japan</string>
     <string name="settings_opt_region_europe">Europe</string>
+
+    <!-- Pad type and the 3D Control Pad -->
+    <string name="settings_pad_type">Pad type</string>
+    <string name="settings_pad_type_summary">Which pad the console\'s two controller ports take, together. Applies on the next boot</string>
+    <string name="settings_opt_pad_standard">Standard pad</string>
+    <string name="settings_opt_pad_3d">3D Control Pad</string>
+    <string name="pad_analog">ANALOG</string>
+    <string name="pad_edit_analog">Analog mode</string>
 </resources>

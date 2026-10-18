@@ -10,6 +10,8 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.kira3.ametrine.AmetrineApplication
 import com.kira3.ametrine.data.Bios
 import com.kira3.ametrine.data.BiosRepository
+import com.kira3.ametrine.data.CartRom
+import com.kira3.ametrine.data.CartRomRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -23,15 +25,23 @@ data class BiosUiState(
     val installed: List<Bios>? = null,
     val importing: Boolean = false,
     val invalidFile: Boolean = false,
+    /** The ROM carts that have a file. */
+    val carts: Set<CartRom> = emptySet(),
+    val invalidCart: Boolean = false,
 )
 
-class BiosViewModel(private val repository: BiosRepository) : ViewModel() {
+class BiosViewModel(
+    private val repository: BiosRepository,
+    private val cartRepository: CartRomRepository,
+) : ViewModel() {
     private val installed = MutableStateFlow<List<Bios>?>(null)
     private val importing = MutableStateFlow(false)
     private val invalidFile = MutableStateFlow(false)
+    private val carts = MutableStateFlow<Set<CartRom>>(emptySet())
+    private val invalidCart = MutableStateFlow(false)
 
-    val uiState: StateFlow<BiosUiState> = combine(installed, importing, invalidFile) { installed, importing, invalid ->
-        BiosUiState(installed, importing, invalid)
+    val uiState: StateFlow<BiosUiState> = combine(installed, importing, invalidFile, carts, invalidCart) { installed, importing, invalid, carts, invalidCart ->
+        BiosUiState(installed, importing, invalid, carts, invalidCart)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), BiosUiState())
 
     init {
@@ -59,8 +69,29 @@ class BiosViewModel(private val repository: BiosRepository) : ViewModel() {
 
     fun onInvalidFileShown() = invalidFile.update { false }
 
+    fun onCartPicked(rom: CartRom, uri: Uri) {
+        viewModelScope.launch {
+            val ok = runCatching { cartRepository.import(rom, uri) }
+                .onFailure { Log.e(TAG, "Importing ${rom.fileName} failed", it) }
+                .getOrDefault(false)
+            if (!ok) invalidCart.value = true
+            carts.value = cartRepository.installed()
+        }
+    }
+
+    fun deleteCart(rom: CartRom) {
+        viewModelScope.launch {
+            runCatching { cartRepository.delete(rom) }
+                .onFailure { Log.e(TAG, "Deleting ${rom.fileName} failed", it) }
+            carts.value = cartRepository.installed()
+        }
+    }
+
+    fun onInvalidCartShown() = invalidCart.update { false }
+
     private fun reload() {
         viewModelScope.launch {
+            carts.value = runCatching { cartRepository.installed() }.getOrDefault(emptySet())
             installed.value = runCatching { repository.installed() }
                 .onFailure { Log.e(TAG, "Listing BIOS files failed", it) }
                 .getOrDefault(emptyList())
@@ -73,7 +104,7 @@ class BiosViewModel(private val repository: BiosRepository) : ViewModel() {
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val container = (this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as AmetrineApplication).container
-                BiosViewModel(container.biosRepository)
+                BiosViewModel(container.biosRepository, container.cartRomRepository)
             }
         }
     }

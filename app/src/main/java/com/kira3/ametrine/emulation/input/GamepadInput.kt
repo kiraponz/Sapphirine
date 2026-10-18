@@ -17,10 +17,16 @@ import kotlin.math.max
  *
  * A pad can report the same control twice (the D-pad as keys and as a HAT axis, L2/R2 as
  * keys and as trigger axes), so each source is tracked separately and merged; the core
- * only hears about changes. The Saturn pad has no stick, so the left stick also works the
- * D-pad.
+ * only hears about changes. The standard Saturn pad has no stick, so the left stick also works
+ * the D-pad; a 3D Control Pad boot ([padType3d]) takes the stick as the pad's analog stick
+ * instead, and the analog triggers' values as its analog L and R.
  */
-class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
+class GamepadInput(
+    private val core: EmulatorCore,
+    private val port: Int = 0,
+    /** True while the boot the input serves runs a 3D Control Pad (EmulationActivity reads the pad-type setting). */
+    private val padType3d: () -> Boolean = { false },
+) {
     /** Called when someone deliberately uses a controller (not just resting stick noise). */
     var onControllerUsed: (() -> Unit)? = null
 
@@ -154,19 +160,29 @@ class GamepadInput(private val core: EmulatorCore, private val port: Int = 0) {
 
     private fun pressureOf(button: PadButton): Float {
         val fromKey = if (keysHeld[button.ordinal]) 1f else 0f
-        val (stickX, stickY) = sentStick[PadStick.Left.ordinal]
-        val fromAxis = when (button) {
-            PadButton.Up -> if (hatY < -HAT_THRESHOLD || stickY < -STICK_DPAD_THRESHOLD) 1f else 0f
-            PadButton.Down -> if (hatY > HAT_THRESHOLD || stickY > STICK_DPAD_THRESHOLD) 1f else 0f
-            PadButton.Left -> if (hatX < -HAT_THRESHOLD || stickX < -STICK_DPAD_THRESHOLD) 1f else 0f
-            PadButton.Right -> if (hatX > HAT_THRESHOLD || stickX > STICK_DPAD_THRESHOLD) 1f else 0f
+        val fromHat = when (button) {
+            PadButton.Up -> if (hatY < -HAT_THRESHOLD) 1f else 0f
+            PadButton.Down -> if (hatY > HAT_THRESHOLD) 1f else 0f
+            PadButton.Left -> if (hatX < -HAT_THRESHOLD) 1f else 0f
+            PadButton.Right -> if (hatX > HAT_THRESHOLD) 1f else 0f
             else -> 0f
+        }
+        val (stickX, stickY) = sentStick[PadStick.Left.ordinal]
+        // With a 3D Control Pad the left stick is the pad's stick, not the D-pad's second face.
+        val fromStick = if (!padType3d()) when (button) {
+            PadButton.Up -> if (stickY < -STICK_DPAD_THRESHOLD) 1f else 0f
+            PadButton.Down -> if (stickY > STICK_DPAD_THRESHOLD) 1f else 0f
+            PadButton.Left -> if (stickX < -STICK_DPAD_THRESHOLD) 1f else 0f
+            PadButton.Right -> if (stickX > STICK_DPAD_THRESHOLD) 1f else 0f
+            else -> 0f
+        } else {
+            0f
         }
         val fromTrigger = max(
             if (button == leftTriggerButton) triggerPressure(leftTrigger) else 0f,
             if (button == rightTriggerButton) triggerPressure(rightTrigger) else 0f,
         )
-        return maxOf(fromKey, fromAxis, fromTrigger)
+        return maxOf(fromKey, fromHat, fromStick, fromTrigger)
     }
 
     private fun triggerPressure(value: Float): Float =

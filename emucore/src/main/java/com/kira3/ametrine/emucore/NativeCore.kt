@@ -8,9 +8,9 @@ import android.view.Surface
  * 1.32.1's "ss" module). Native code finds this class by name to call the callbacks at the
  * bottom, so its name and members must not change (consumer-rules.pro keeps them).
  *
- * The methods this step of the port does not have yet (the 3D Control Pad's stick, cheat files and
- * the cheat database, the disc-set GameDB) still answer with their "not available" values, so the
- * frontend screens keep working until they are wired up.
+ * The methods this step of the port does not have yet (the cheat files and the cheat database,
+ * the disc-set GameDB) still answer with their "not available" values, so the frontend screens
+ * keep working until they are wired up.
  *
  * Use [EmulatorCore] instead of calling this directly.
  */
@@ -91,6 +91,12 @@ internal object NativeCore {
     /** Presses ([value] > 0.5) or releases the button [index] (a [PadButton.code]) of the pad in [port] (0 or 1). */
     @JvmStatic external fun setPadBind(port: Int, index: Int, value: Float)
 
+    /**
+     * Moves the pad's stick (the left one, [right] ignored: the 3D Control Pad has a single
+     * stick) to ([x], [y]), each -1..1 with +y down.
+     */
+    @JvmStatic external fun setPadStick(port: Int, right: Boolean, x: Float, y: Float)
+
     /** Runs as fast as it can while [enabled], at the fast-forward volume. */
     @JvmStatic external fun setFastForward(enabled: Boolean)
 
@@ -141,9 +147,6 @@ internal object NativeCore {
     @JvmStatic external fun saveScreenshot(path: String)
 
     // ---- Not available yet: these keep the frontend compiling until their task comes up ----
-
-    /** Moves the left or [right] stick of the pad in [port] to ([x], [y]), each -1..1 with +y down. Not used until the 3D Control Pad. */
-    @JvmStatic fun setPadStick(port: Int, right: Boolean, x: Float, y: Float) = Unit
 
     /** Alternating names and code lines of the cheats in a cheat file's [text]; null if it has none. */
     @JvmStatic fun parseCheats(text: String): Array<String>? = null

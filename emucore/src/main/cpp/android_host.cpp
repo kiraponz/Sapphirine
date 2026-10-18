@@ -727,6 +727,12 @@ void apply_bios_settings()
 	if (na_eu_path.size())
 		Mednafen::MDFNI_SetSetting("ss.bios_na_eu", na_eu_path.c_str(), false);
 
+	// The two ROM carts a few games need (the app keeps them as kof95.bin and ultraman.bin in
+	// <data>/carts, CartRomRepository). The core opens one only for a game its cart database
+	// pairs with it; without the file that boot fails with the module's own file error.
+	Mednafen::MDFNI_SetSetting("ss.cart.kof95_path", (s_data_dir + "/carts/kof95.bin").c_str(), false);
+	Mednafen::MDFNI_SetSetting("ss.cart.ultraman_path", (s_data_dir + "/carts/ultraman.bin").c_str(), false);
+
 	// The module's checks refuse a BIOS of the other region, and any file named like a known
 	// image without being it. The app lets a game's settings pick any BIOS (and falls back to
 	// one of another region when that is all there is), so they stay off.
@@ -758,28 +764,120 @@ struct InputBuffer
 // src/ss/smpc.cpp); both get a standard pad.
 constexpr unsigned PAD_PORTS = 2;
 
-InputBuffer s_gamepad_buffers[PAD_PORTS];	// Ports 0 and 1: the digital gamepads.
+InputBuffer s_gamepad_buffers[PAD_PORTS];	// Ports 0 and 1: the connected pads (digital gamepads, or 3D Control Pads with "Input"/"PadType" set to "3d").
 InputBuffer s_builtin_buffer;	// Port 12: the reset / ST-V buttons, never pressed by us.
+
+// Which pad the two connectors take. Set from the app's settings (SetSetting "Input"/"PadType";
+// the app only sends it between boots) and read in connect_input_devices, to pick the device,
+// and in update_pad_buffers, to fill its input. True for the "3dpad" of src/ss/input/3dpad.cpp:
+// a 16-bit button word (bits 0-11 up,down,left,right,B,C,A,Start,Z,Y,X,nothing; bit 0x1000, the
+// mode switch, on = analog), then the thumb's X and Y and the shoulders' left and right as
+// 0..65535 each (src/ss/input/3dpad.cpp's UpdateInput).
+std::atomic<bool> s_pad_3d{ false };
 
 // The pressed buttons per pad, one bit per button at its IODevice_Gamepad_IDII position
 // (src/ss/input/gamepad.cpp: Z, Y, X, R, up, down, left, right, B, C, A, Start, -, -, -, L;
-// PadButton.code on the Kotlin side). Written by the UI thread, read by the CPU thread.
+// PadButton.code on the Kotlin side). Written by the UI thread, read by the CPU thread. In
+// 3D pad mode the bits are the same buttons' presses, converted to the 3D pad's word as they
+// are copied over (see the conversion table by update_pad_buffers).
 std::atomic<uint16_t> s_pad_bits[PAD_PORTS];
+
+// The 3D pad's thumb position, x and y in -1..1 (+y down), and its shoulders' how-far-pulled,
+// 0..1: the left and right triggered together by a press of L and R. Written by the UI thread
+// (SetPadStick, SetPadBind), read by the CPU thread.
+std::atomic<float> s_pad_stick[PAD_PORTS][2];
+std::atomic<float> s_pad_shoulder[PAD_PORTS][2];
+
+// The 3D pad's analog mode (bit 0x1000 of its button word), toggled per pad by the Analog
+// presses that come up from the touch pad, and reset to analog at every boot (a boot explains
+// the switch's real position to the core no better than the game does).
+std::atomic<bool> s_pad_3d_mode[PAD_PORTS];
+
+// A -1..1 (or 0..1) value as the 3D pad's 0..65535 axes read it, rounding to nearest; no
+// dead-zone shaping happens here, the app sends its values already shaped.
+uint16_t pad_axis_value(float value)
+{
+	value = std::clamp(value, 0.0f, 1.0f);
+	return (uint16_t)(value * 65535.0f + 0.5f);
+}
 
 // Hands the pads' current buttons to the core, ahead of MDFNI_Emulate (which reads the buffers
 // as the frame starts, and at its mid-frame syncs). The gamepad device takes the bits as two
-// little-endian bytes and inverts them itself.
+// little-endian bytes and inverts them itself; the 3D pad builds the 10 bytes its IDII lays out.
 void update_pad_buffers()
 {
+	const bool pad_3d = s_pad_3d.load(std::memory_order_relaxed);
+
 	for(unsigned port = 0; port < PAD_PORTS; port++)
 	{
 		const InputBuffer& buffer = s_gamepad_buffers[port];
-		if(!buffer.ptr || buffer.size < 2)
+		if(!buffer.ptr)
 			continue;
 
+		if(!pad_3d)
+		{
+			if(buffer.size < 2)
+				continue;
+
+			const uint16_t bits = s_pad_bits[port].load(std::memory_order_relaxed);
+			buffer.ptr[0] = (uint8)bits;
+			buffer.ptr[1] = (uint8)(bits >> 8);
+			continue;
+		}
+
+		if(buffer.size < 10)
+			continue;
+
+		// The same buttons at the 3D pad's word's positions: the two IDIIs declare them in
+		// different orders (src/ss/input/gamepad.cpp: Z, Y, X, R, up, down, ..., L;
+		// src/ss/input/3dpad.cpp: up, down, left, right, B, C, A, Start, Z, Y, X, pad, mode),
+		// so the gamepad bit's position maps over. Where there is no 3D pad bit (0xff) — the
+		// shoulders, gamepad bits 3 (R) and 15 (L) — they go through the shoulder axes, whose
+		// values the device turns back into the word's own L and R bits.
+		constexpr uint8_t GAMEPAD_BIT_TO_3DPAD_BIT[16] =
+		{
+			8, 9, 10, 0xff, 0, 1, 2, 3, 4, 5, 6, 7, 0xff, 0xff, 0xff, 0xff,
+		};
+
 		const uint16_t bits = s_pad_bits[port].load(std::memory_order_relaxed);
-		buffer.ptr[0] = (uint8)bits;
-		buffer.ptr[1] = (uint8)(bits >> 8);
+		uint16_t buttons = 0;
+
+		for(unsigned i = 0; i < 16; i++)
+		{
+			const uint8_t converted = GAMEPAD_BIT_TO_3DPAD_BIT[i];
+
+			if(((bits >> i) & 1) && converted != 0xff)
+				buttons |= (uint16_t)(1u << converted);
+		}
+
+		// The mode switch its own word reads. Bits 3 and 15 of the word stay clear here: the
+		// device takes the shoulders' digital state from the shoulder axes' values alone.
+		if(s_pad_3d_mode[port].load(std::memory_order_relaxed))
+			buttons |= 0x1000;
+
+		float right_shoulder = s_pad_shoulder[port][1].load(std::memory_order_relaxed);
+		float left_shoulder = s_pad_shoulder[port][0].load(std::memory_order_relaxed);
+
+		if(bits & (1u << 3))	// A held R is a fully pulled one, however the app fashioned it.
+			right_shoulder = 1.0f;
+		if(bits & (1u << 15))
+			left_shoulder = 1.0f;
+
+		const uint16_t thumb_x = pad_axis_value((s_pad_stick[port][0].load(std::memory_order_relaxed) + 1.0f) * 0.5f);
+		const uint16_t thumb_y = pad_axis_value((s_pad_stick[port][1].load(std::memory_order_relaxed) + 1.0f) * 0.5f);
+		const uint16_t shoulder_values[2] = { pad_axis_value(right_shoulder), pad_axis_value(left_shoulder) };
+
+		buffer.ptr[0] = (uint8)buttons;
+		buffer.ptr[1] = (uint8)(buttons >> 8);
+		buffer.ptr[2] = (uint8)thumb_x;
+		buffer.ptr[3] = (uint8)(thumb_x >> 8);
+		buffer.ptr[4] = (uint8)thumb_y;
+		buffer.ptr[5] = (uint8)(thumb_y >> 8);
+		for(unsigned w = 0; w < 2; w++)
+		{
+			buffer.ptr[6 + w * 2] = (uint8)shoulder_values[w];
+			buffer.ptr[7 + w * 2] = (uint8)(shoulder_values[w] >> 8);
+		}
 	}
 }
 
@@ -811,12 +909,15 @@ InputBuffer connect_device(unsigned port, unsigned type)
 	return ret;
 }
 
-// The port wiring: a gamepad on each connector, nothing on the other virtual (multitap) ports,
-// and the builtin switches last. All buffers come back zeroed.
+// The port wiring: a digital gamepad, or a 3D Control Pad when the settings say so, on each
+// connector (both get the same kind together — the app has no per-port pad choice), nothing on
+// the other virtual (multitap) ports, and the builtin switches last. All buffers come back zeroed.
 void connect_input_devices()
 {
+	const bool pad_3d = s_pad_3d.load(std::memory_order_relaxed);
+
 	for(unsigned port = 0; port < PAD_PORTS; port++)
-		s_gamepad_buffers[port] = connect_device(port, device_connect_index(port, "gamepad"));
+		s_gamepad_buffers[port] = connect_device(port, device_connect_index(port, pad_3d ? "3dpad" : "gamepad"));
 	for(unsigned port = PAD_PORTS; port < 12; port++)
 		Mednafen::MDFNI_SetInput(port, device_connect_index(port, "none"));
 	s_builtin_buffer = connect_device(12, device_connect_index(12, "builtin"));
@@ -1712,9 +1813,22 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		open_audio();
 
 		// Every boot starts with nothing held, and no rewind points (they belong to the
-		// boot and its place in the game, like the pads' buttons do).
+		// boot and its place in the game, like the pads' buttons do). With 3D pads, they
+		// also start centered and in analog mode.
 		for(auto& bits : s_pad_bits)
 			bits.store(0, std::memory_order_relaxed);
+		for(auto& stick : s_pad_stick)
+		{
+			stick[0].store(0.0f, std::memory_order_relaxed);
+			stick[1].store(0.0f, std::memory_order_relaxed);
+		}
+		for(auto& shoulder : s_pad_shoulder)
+		{
+			shoulder[0].store(0.0f, std::memory_order_relaxed);
+			shoulder[1].store(0.0f, std::memory_order_relaxed);
+		}
+		for(auto& mode : s_pad_3d_mode)
+			mode.store(true, std::memory_order_relaxed);
 		clear_rewind_points();
 
 		s_active.store(true);
@@ -1966,16 +2080,53 @@ void RequestShutdown()
 	s_vm_cond.notify_all();
 }
 
-void SetPadBind(uint32_t port, uint32_t index, bool pressed)
+void SetPadBind(uint32_t port, uint32_t index, float value)
 {
-	if(port >= PAD_PORTS || index >= 16)
+	if(port >= PAD_PORTS)
+		return;
+
+	// The Analog entry of PadButton (code 16) is not a Saturn button: on a 3D pad, a press
+	// (the edge; releases come as 0) flips the analog mode. With a gamepad connected the core
+	// hears nothing of it.
+	if(index == 16)
+	{
+		if(s_pad_3d.load(std::memory_order_relaxed) && value > 0.5f)
+		{
+			const bool analog = !s_pad_3d_mode[port].load(std::memory_order_relaxed);
+			s_pad_3d_mode[port].store(analog, std::memory_order_relaxed);
+			__android_log_print(ANDROID_LOG_INFO, LOG_TAG, "pad %d in %s mode", port, analog ? "analog" : "digital");
+		}
+		return;
+	}
+
+	if(index >= 16)
 		return;
 
 	const uint16_t bit = (uint16_t)(1u << index);
-	if(pressed)
+	if(value > 0.5f)
 		s_pad_bits[port].fetch_or(bit, std::memory_order_relaxed);
 	else
 		s_pad_bits[port].fetch_and((uint16_t)~bit, std::memory_order_relaxed);
+
+	// The shoulders' pressure rides along with the digital presses: L and R are the only
+	// PadButtons the 3D pad senses degree by degree, as its analog shoulder axes (index here
+	// is the gamepad bit, 3 = R and 15 = L; the device maps a value back onto the word's own
+	// L and R bits, so the digital presses stay heard in the analog positions too).
+	if(index == 3)
+		s_pad_shoulder[port][1].store(std::clamp(value, 0.0f, 1.0f), std::memory_order_relaxed);
+	else if(index == 15)
+		s_pad_shoulder[port][0].store(std::clamp(value, 0.0f, 1.0f), std::memory_order_relaxed);
+}
+
+void SetPadStick(uint32_t port, float x, float y)
+{
+	// One call moves whichever stick the app's input comes from; the 3D pad has a single one,
+	// so the right stick has nowhere to arrive (the device's second thumb axis is its Y).
+	if(port >= PAD_PORTS)
+		return;
+
+	s_pad_stick[port][0].store(std::clamp(x, -1.0f, 1.0f), std::memory_order_relaxed);
+	s_pad_stick[port][1].store(std::clamp(y, -1.0f, 1.0f), std::memory_order_relaxed);
 }
 
 void SetFastForward(bool enabled)
@@ -2001,6 +2152,15 @@ void SetSetting(const char* section, const char* key, const char* value)
 				: !strcmp(value, "Stretch") ? AspectRatio::Stretch : AspectRatio::Standard,
 				std::memory_order_relaxed);
 		}
+		return;
+	}
+
+	if (!strcmp(section, "Input"))
+	{
+		// Which pad the connectors take ("standard" or "3d"); read when a game connects its
+		// input devices, so it applies on the next boot.
+		if (!strcmp(key, "PadType"))
+			s_pad_3d.store(!strcmp(value, "3d"), std::memory_order_relaxed);
 		return;
 	}
 

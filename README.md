@@ -1,4 +1,4 @@
-# EmuFrontend
+# Sapphirine
 
 An emulator frontend for Android, to start new emulators from. It is the app of
 [Aegirine](https://github.com/kiraponz/Aegirine) (library, settings, touch controls, save states,
@@ -43,4 +43,4 @@ From the command line, point `JAVA_HOME` at Android Studio's JDK (on macOS,
 
 ## License
 
-EmuFrontend is free software under the [GNU General Public License v3.0](LICENSE).
+Sapphirine is free software under the [GNU General Public License v3.0](LICENSE).

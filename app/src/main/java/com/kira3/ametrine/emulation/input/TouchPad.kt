@@ -115,6 +115,8 @@ class PadEditor(initial: PadLayoutEdits) {
  * Held upright, a floating stick does not start on the picture, which the core draws at the top
  * with the shape [gameAspect] (width / height; null when it fills the screen).
  * [opacity] fades the whole pad; [haptics] turns off the vibration on a press.
+ * [analog3d] is a 3D Control Pad boot: the preset layout then carries a left stick (a floating
+ * stick mode takes it over) and the pad's ANALOG mode toggle.
  *
  * After [idleSeconds] without a touch (0 = never) the pad and the function buttons turn more transparent,
  * until the next touch.
@@ -137,6 +139,9 @@ fun TouchPad(
     floatingSticks: Boolean = false,
     gameAspect: Float? = null,
     opacity: Float = 1f,
+
+    /** True for a 3D Control Pad boot: the default layout gains a left stick and an ANALOG mode toggle. */
+    analog3d: Boolean = false,
     haptics: Boolean = true,
     edits: PadLayoutEdits = PadLayoutEdits(),
     editor: PadEditor? = null,
@@ -193,8 +198,8 @@ fun TouchPad(
         // Without the pad (a controller is in use) only the function buttons are shown, in a layout of their own.
         val controllerMode = editor?.controllerMode ?: !visible
         val activeEdits = (editor?.edits ?: edits).of(landscape, controllerMode)
-        val layout = remember(constraints.maxWidth, constraints.maxHeight, maxUnit, floatingSticks, activeEdits, controllerMode) {
-            (if (controllerMode) controllerLayout(area, maxUnit) else touchPadLayout(area, maxUnit))
+        val layout = remember(constraints.maxWidth, constraints.maxHeight, maxUnit, floatingSticks, analog3d, activeEdits, controllerMode) {
+            (if (controllerMode) controllerLayout(area, maxUnit) else touchPadLayout(area, maxUnit, analog3d))
                 .let { if (floatingSticks) it.withoutSticks() else it }
                 .edited(activeEdits, area)
         }
@@ -369,6 +374,7 @@ private fun buttonLabels(): Map<PadButton, String> = mapOf(
     PadButton.L to stringResource(R.string.pad_l),
     PadButton.R to stringResource(R.string.pad_r),
     PadButton.Start to stringResource(R.string.pad_start),
+    PadButton.Analog to stringResource(R.string.pad_analog),
 )
 
 /** Which control each finger is on, and what the pad as a whole is holding. */

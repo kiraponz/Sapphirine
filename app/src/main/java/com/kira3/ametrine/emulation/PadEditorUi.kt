@@ -135,6 +135,7 @@ private fun padControlLabel(id: String): String = stringResource(
         "btn.L" -> R.string.pad_l
         "btn.R" -> R.string.pad_r
         "btn.Start" -> R.string.pad_start
+        "btn.Analog" -> R.string.pad_edit_analog
         else -> R.string.pad_edit_title
     },
 )

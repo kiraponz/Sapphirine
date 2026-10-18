@@ -41,6 +41,9 @@ class EmulatorCore(context: Context) {
      */
     val biosDir: File = File(dataDir, "bios")
 
+    /** Where the ROM carts (the KoF '95 and Ultraman cartridges) are kept, as `kof95.bin` and `ultraman.bin`. */
+    val cartsDir: File = File(dataDir, "carts")
+
     /** Where the core keeps its backup memory (Mednafen's save folder: `.bkr`, `.bcr` and `.smpc` files). */
     val memoryCardsDir: File = File(dataDir, "memcards")
 
@@ -81,6 +84,7 @@ class EmulatorCore(context: Context) {
 
         withContext(Dispatchers.IO) {
             biosDir.mkdirs()
+            cartsDir.mkdirs()
             CoreResources.install(appContext, dataDir)
 
             NativeCore.files = files
@@ -512,18 +516,19 @@ class EmulatorCore(context: Context) {
 
     /**
      * Presses or releases [button] on [port] (0 = player 1, 1 = player 2). [pressure] (0..1) is
-     * how hard a pressed button is pushed; the Saturn pad does not sense it, so only [pressed]
-     * reaches the game.
+     * how hard a pressed button is pushed: only the 3D Control Pad's shoulders read it, as their
+     * analog L and R — every other button reaches the game as a plain press. Pressing [Analog]
+     * toggles that pad's analog mode.
      */
     fun setPadButton(port: Int, button: PadButton, pressed: Boolean, pressure: Float = 1f) {
         padListener?.onButton(port, button, pressed, pressure)
-        NativeCore.setPadBind(port, button.code, if (pressed) 1f else 0f)
+        NativeCore.setPadBind(port, button.code, if (pressed) pressure.coerceIn(0f, 1f) else 0f)
     }
 
     /**
      * Moves [stick] on [port] to ([x], [y]), each -1..1 with +x right and +y down. Shape the
-     * input (deadzone) before calling; this sends it as is. The core does not take sticks until
-     * the 3D Control Pad is connected, so for now this only reaches [padListener].
+     * input (deadzone) before calling; this sends it as is. The core takes the left stick on a
+     * 3D Control Pad boot (the pad has one stick); the right one reaches only [padListener].
      */
     fun setPadStick(port: Int, stick: PadStick, x: Float, y: Float) {
         padListener?.onStick(port, stick, x, y)

@@ -30,10 +30,51 @@ enum class ComponentGroup(@param:StringRes val title: Int) {
 }
 
 /**
- * Everything the licenses screen lists, in the order it lists them. The stub core adds nothing; a
- * real core adds its own entry under [ComponentGroup.Core] and what it links under the others.
+ * Everything the licenses screen lists, in the order it lists them: the core, what it links, and
+ * the Android libraries.
  */
 val openSourceComponents: Map<ComponentGroup, List<OpenSourceComponent>> = mapOf(
+    ComponentGroup.Core to listOf(
+        OpenSourceComponent(
+            "mednafen", "Mednafen (Sega Saturn core)", "GPL-2.0-or-later", "https://mednafen.github.io",
+            listOf("gpl-2.0.txt"),
+            notice = "Copyright the Mednafen Team. Built from the fork at $CORE_SOURCE_URL, with Sapphirine's changes to disc loading and state access.",
+        ),
+    ),
+    ComponentGroup.Native to listOf(
+        OpenSourceComponent(
+            "libchdr", "libchdr", "BSD-3-Clause", "https://github.com/rtissera/libchdr",
+            listOf("libchdr-bsd-3-clause.txt"),
+        ),
+        OpenSourceComponent(
+            "lzma", "LZMA SDK", "Public domain", "https://www.7-zip.org/sdk.html",
+            listOf("lzma-sdk.txt"), notice = "Igor Pavlov",
+        ),
+        OpenSourceComponent(
+            "zstd", "Zstandard (decoder)", "BSD-3-Clause", "https://github.com/facebook/zstd",
+            listOf("zstd-bsd.txt"),
+        ),
+        OpenSourceComponent(
+            "tremor", "Tremor (Ogg Vorbis decoder)", "BSD-3-Clause", "https://gitlab.xiph.org/xiph/tremor",
+            listOf("tremor-bsd.txt"),
+        ),
+        OpenSourceComponent(
+            "musepack", "Musepack decoder", "BSD-3-Clause", "https://www.musepack.net",
+            listOf("musepack-bsd-3-clause.txt"),
+        ),
+        OpenSourceComponent(
+            "trio", "trio", "ISC-style", "https://daniel.haxx.se/projects/trio/",
+            listOf("trio.txt"),
+        ),
+        OpenSourceComponent(
+            "minilzo", "miniLZO", "GPL-2.0-or-later", "https://www.oberhumer.com/opensource/lzo/",
+            listOf("gpl-2.0.txt"), notice = "Copyright Markus F.X.J. Oberhumer",
+        ),
+        OpenSourceComponent(
+            "quicklz", "QuickLZ 1.3.1", "GPL-2.0", "http://www.quicklz.com",
+            listOf("gpl-2.0.txt"), notice = "Copyright Lasse Mikkel Reinhold",
+        ),
+    ),
     ComponentGroup.Android to listOf(
         OpenSourceComponent(
             "androidx", "AndroidX and Jetpack Compose", "Apache-2.0", "https://developer.android.com/jetpack/androidx",
@@ -47,14 +88,17 @@ val openSourceComponents: Map<ComponentGroup, List<OpenSourceComponent>> = mapOf
 )
 
 /** Where this app's source is published. */
-const val SOURCE_URL = "https://github.com/kiraponz/EmuFrontend"
+const val SOURCE_URL = "https://github.com/kiraponz/Sapphirine"
 
-/** The core's source at [commit], kept so the core's source stays available. Null without a core repository. */
-fun coreSourceUrl(commit: String): String? = null
+/** Where the Mednafen fork the core is built from is published (see [coreSourceUrl]). */
+const val CORE_SOURCE_URL = "https://github.com/kiraponz/sapphirine-core"
+
+/** Where the core's source is kept; [version] is the Mednafen version the core is built from. */
+fun coreSourceUrl(version: String): String? = CORE_SOURCE_URL
 
 /** This app itself, for its own license from About. */
 val ametrineComponent = OpenSourceComponent(
-    "emufrontend", "EmuFrontend", "GPL-3.0", SOURCE_URL, listOf("gpl-3.0.txt"),
+    "sapphirine", "Sapphirine", "GPL-3.0", SOURCE_URL, listOf("gpl-3.0.txt"),
     notice = "Copyright 2026 Kira",
 )
 

@@ -218,6 +218,14 @@ object SettingsCatalog {
             R.string.settings_section_controllers,
             listOf(
                 ControllersSetting,
+                Choice(
+                    "console.padType", R.string.settings_pad_type, R.string.settings_pad_type_summary,
+                    named(
+                        "standard" to res(R.string.settings_opt_pad_standard),
+                        "3d" to res(R.string.settings_opt_pad_3d),
+                    ),
+                    inline = true,
+                ),
                 Slider(
                     "controls.stickDeadzone", R.string.settings_stick_deadzone,
                     range = 0..50, step = 1, unit = R.string.settings_unit_percent,

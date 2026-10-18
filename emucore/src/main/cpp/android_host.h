@@ -33,9 +33,16 @@ bool HasActiveSystem();
 void RequestPause(bool paused);
 void RequestShutdown();
 
-// Presses or releases the button at bit [index] (PadButton.code) of the pad on [port] (0 or 1).
-// Any thread; the CPU thread hands it to the core at the next frame or mid-frame sync.
-void SetPadBind(uint32_t port, uint32_t index, bool pressed);
+// Presses or releases the button at bit [index] (PadButton.code) of the pad on [port] (0 or 1),
+// with [value] the pressure (0..1; only [port]'s 3D Control Pad's analog shoulders, its L and R,
+// take the value in). Code 16 (PadButton.Analog) is not a Saturn button: on a 3D pad a press
+// flips its analog mode. Any thread; the CPU thread hands it to the core at the next frame or
+// mid-frame sync.
+void SetPadBind(uint32_t port, uint32_t index, float value);
+
+// Moves the pad's stick (the left one, the only one a 3D Control Pad has) to [x] and [y], each
+// -1..1 with +y down. Any thread; the CPU thread hands it to the core at the next frame.
+void SetPadStick(uint32_t port, float x, float y);
 
 // Runs at the fast-forward speed (SetSetting "Main"/FastForwardSpeed) while [enabled], at the
 // fast-forward volume.

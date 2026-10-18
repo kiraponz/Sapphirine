@@ -105,7 +105,11 @@ class EmulationActivity : ComponentActivity() {
     private var suspendFile: File? = null
 
     // Input goes straight to the core from the input callbacks, not through a ViewModel.
-    private val gamepad by lazy { GamepadInput(core) }
+    // The pad type reaches the controller from [bootPad3d]: only a boot lays one in (the type
+    // applies on the next boot), so mid-session edits of the setting change nothing here.
+    private val gamepad by lazy {
+        GamepadInput(core, padType3d = { bootPad3d })
+    }
     private val rumble by lazy { ControllerRumble { gamepad.lastDeviceId } }
     private val touchSink by lazy {
         object : PadSink {
@@ -129,6 +133,10 @@ class EmulationActivity : ComponentActivity() {
 
     /** What the game runs with, once read. The fast-forward button and the menu show from it. */
     private var settings by mutableStateOf<EmulatorSettings?>(null)
+
+    /** The pad the current boot has in its connectors (the type applies on the next boot): true for a 3D Control Pad. */
+    @Volatile
+    private var bootPad3d = false
 
     private var serial: String? = null
 
@@ -292,6 +300,7 @@ class EmulationActivity : ComponentActivity() {
                             null
                         },
                         floatingSticks = settings?.controls?.stickMode == 1,
+                        analog3d = if (editPadOnly) settings?.console?.padType == "3d" else bootPad3d,
                         gameAspect = settings?.display?.let(::gameAspectOf),
                         opacity = (settings?.controls?.padOpacity ?: 100) / 100f,
                         haptics = settings?.controls?.padHaptics != false,
@@ -462,6 +471,8 @@ class EmulationActivity : ComponentActivity() {
         apply(global, overrides)
         applyEmulationOrientation()
         applyOutputScale()
+        // What the input code lays the pads out for: the boot's own value of the pad type.
+        bootPad3d = SettingsJson.merge(global, overrides).console.padType == "3d"
         val suspended = serial?.takeIf { resume }?.let { withContext(Dispatchers.IO) { core.suspendStateFile(it) } }
         suspendFile = suspended
         core.setBootSaveState(suspended)

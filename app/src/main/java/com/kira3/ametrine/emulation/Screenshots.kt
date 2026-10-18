@@ -15,14 +15,14 @@ import java.io.RandomAccessFile
 
 /**
  * Screenshots of the running game. The core writes the PNG into the app's own folder, which
- * the Files app cannot show, so it is copied into Pictures/EmuFrontend/<serial> for the gallery.
+ * the Files app cannot show, so it is copied into Pictures/Sapphirine/<serial> for the gallery.
  */
 class Screenshots(private val context: Context, private val core: EmulatorCore) {
     /** Captures the next frame and publishes it. Returns false if it never arrived or could not be copied. */
     suspend fun capture(serial: String?): Boolean = withContext(Dispatchers.IO) {
         val dir = File(core.dataDir, "snaps").apply { mkdirs() }
         // The core takes the path as is only when it ends in .png.
-        val png = File(dir, "${serial ?: "EmuFrontend"}_${System.currentTimeMillis()}.png")
+        val png = File(dir, "${serial ?: "Sapphirine"}_${System.currentTimeMillis()}.png")
         if (!capture(png)) return@withContext false
         runCatching { publish(png, serial) }
             .onFailure { Log.e(TAG, "Could not publish $png", it) }
@@ -79,7 +79,7 @@ class Screenshots(private val context: Context, private val core: EmulatorCore) 
 
     private companion object {
         const val TAG = "Screenshots"
-        const val ALBUM = "EmuFrontend"
+        const val ALBUM = "Sapphirine"
         const val POLL_MS = 100L
 
         // A large upscaled frame can take a few seconds to compress on a slow phone.

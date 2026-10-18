@@ -9,6 +9,7 @@ object SettingsEffects {
     val appliesOnNextBoot: Set<String> = setOf(
         "console.region",
         "console.cart",
+        "console.padType",
         "console.autoRtc",
         "console.language",
         "display.hOverscan",

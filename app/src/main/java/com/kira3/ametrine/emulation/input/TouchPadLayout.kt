@@ -108,13 +108,18 @@ internal fun controllerLayout(size: Size, maxUnit: Float): TouchPadLayout {
  *
  * Landscape puts the clusters on either side of the picture, as on a Saturn pad. Portrait
  * stacks them under the picture, which the core draws at the top of the screen.
+ *
+ * With [analog3d] (a 3D Control Pad boot) a stick joins the pad, above the D-pad in landscape
+ * and between the clusters in portrait, next to a small ANALOG mode toggle (the pad keeps its
+ * D-pad). The standard layouts stay exactly as they were.
  */
-internal fun touchPadLayout(size: Size, maxUnit: Float): TouchPadLayout =
-    if (size.width >= size.height) landscapeLayout(size, maxUnit) else portraitLayout(size, maxUnit)
+internal fun touchPadLayout(size: Size, maxUnit: Float, analog3d: Boolean = false): TouchPadLayout =
+    if (size.width >= size.height) landscapeLayout(size, maxUnit, analog3d) else portraitLayout(size, maxUnit, analog3d)
 
-private fun landscapeLayout(size: Size, maxUnit: Float): TouchPadLayout {
+private fun landscapeLayout(size: Size, maxUnit: Float, analog3d: Boolean): TouchPadLayout {
     val (w, h) = size
-    val u = min(min(h / 6.5f, w / 14f), maxUnit)
+    // The stick needs a row of its own above the cluster, so it lays out from a little more height.
+    val u = min(if (analog3d) h / 7.4f else h / 6.5f, w / 14f).coerceAtMost(maxUnit)
     val m = 0.35f * u
     val clusterY = h - m - 2.3f * u
     val shoulder = Size(1.7f * u, 0.85f * u)
@@ -126,10 +131,16 @@ private fun landscapeLayout(size: Size, maxUnit: Float): TouchPadLayout {
             add(pill(PadButton.L, Offset(m, m), shoulder))
             add(pill(PadButton.R, Offset(w - m - shoulder.width, m), shoulder))
 
-            add(TouchControl.DPad(Offset(m + 1.5f * u, clusterY), 1.45f * u))
+            if (analog3d) {
+                add(TouchControl.Stick(PadStick.Left, Offset(m + 1.5f * u, clusterY - 1.9f * u), 1.15f * u))
+                add(TouchControl.DPad(Offset(m + 1.5f * u, clusterY + 0.85f * u), 1.45f * u))
+            } else {
+                add(TouchControl.DPad(Offset(m + 1.5f * u, clusterY), 1.45f * u))
+            }
             addAll(faceButtons(Offset(w - m - FACE_HALF_WIDTH * u, clusterY), u))
 
             add(start(Offset(w / 2, h - m - 0.35f * u), u))
+            if (analog3d) add(analogPill(Offset(w / 2 - 1.5f * u, h - m - 0.35f * u), u))
         },
         // Along the top between L and R.
         mapOf(
@@ -142,7 +153,7 @@ private fun landscapeLayout(size: Size, maxUnit: Float): TouchPadLayout {
     )
 }
 
-private fun portraitLayout(size: Size, maxUnit: Float): TouchPadLayout {
+private fun portraitLayout(size: Size, maxUnit: Float, analog3d: Boolean): TouchPadLayout {
     val (w, h) = size
     val u = min(w / 9.6f, maxUnit)
     val m = 0.35f * u
@@ -156,7 +167,12 @@ private fun portraitLayout(size: Size, maxUnit: Float): TouchPadLayout {
             add(pill(PadButton.L, Offset(m, top), shoulder))
             add(pill(PadButton.R, Offset(w - m - shoulder.width, top), shoulder))
             add(start(Offset(w / 2, top + 0.4f * u), u))
+            if (analog3d) add(analogPill(Offset(w / 2 - 1.5f * u, top + 0.4f * u), u))
 
+            if (analog3d) {
+                // In the space between the D-pad and the face buttons.
+                add(TouchControl.Stick(PadStick.Left, Offset(m + 4.2f * u, clusterY), 1.15f * u))
+            }
             add(TouchControl.DPad(Offset(m + 1.5f * u, clusterY), 1.45f * u))
             addAll(faceButtons(Offset(w - m - FACE_HALF_WIDTH * u, clusterY), u))
         },
@@ -200,6 +216,12 @@ private fun faceButtons(center: Offset, u: Float): List<TouchControl> {
 private fun start(center: Offset, u: Float): TouchControl {
     val size = Size(1.3f * u, 0.55f * u)
     return pill(PadButton.Start, center - Offset(size.width / 2, size.height / 2), size)
+}
+
+/** The 3D Control Pad's analog-mode switch, small and shaped like Start so it reads as a helper. */
+private fun analogPill(center: Offset, u: Float): TouchControl {
+    val size = Size(1.3f * u, 0.55f * u)
+    return pill(PadButton.Analog, center - Offset(size.width / 2, size.height / 2), size)
 }
 
 private fun pill(button: PadButton, topLeft: Offset, size: Size) =

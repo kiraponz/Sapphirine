@@ -28,13 +28,18 @@ data class EmulatorSettings(
     val memoryEditor: MemoryEditorSettings = MemoryEditorSettings(),
 )
 
-/** The console: its region, its clock and the cart in its slot. All apply on the next boot. */
+/**
+ * The console: its region, its clock, the cart in its slot and the pad in its connectors. All
+ * apply on the next boot.
+ */
 @Serializable
 data class ConsoleSettings(
     /** ss.region_autodetect and ss.region_default: "auto" (from the disc), "jp", "na" or "eu". */
     val region: String = "auto",
     /** ss.cart: "auto" (what the game needs), "none", "backup", "extram1" or "extram4". */
     val cart: String = "auto",
+    /** Which pad the two connectors take together: "standard" or "3d" (the 3D Control Pad). Reaches the core as Input/PadType. */
+    val padType: String = "standard",
     /** ss.smpc.autortc: sets the console's clock to the phone's at boot. */
     val autoRtc: Boolean = true,
     /** ss.smpc.autortc.lang: the BIOS language, "english", "german", "french", "spanish", "italian" or "japanese". */

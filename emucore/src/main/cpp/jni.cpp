@@ -183,7 +183,15 @@ extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setFastForward)(JNIEnv*, jclass, j
 extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setPadBind)(JNIEnv*, jclass, jint port, jint index, jfloat value)
 {
 	if (port >= 0 && index >= 0)
-		AndroidHost::SetPadBind((uint32_t)port, (uint32_t)index, value > 0.5f);
+		AndroidHost::SetPadBind((uint32_t)port, (uint32_t)index, value);
+}
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setPadStick)(JNIEnv*, jclass, jint port, jboolean right, jfloat x, jfloat y)
+{
+	// [right]: the left stick is the only one a 3D Control Pad has.
+	(void)right;
+	if (port >= 0)
+		AndroidHost::SetPadStick((uint32_t)port, x, y);
 }
 
 // ---- Discs ----

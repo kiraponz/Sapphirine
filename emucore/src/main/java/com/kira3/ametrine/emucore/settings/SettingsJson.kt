@@ -32,6 +32,7 @@ object SettingsJson {
     private val choices: Map<String, Set<String>> = mapOf(
         "console.region" to setOf("auto", "jp", "na", "eu"),
         "console.cart" to setOf("auto", "none", "backup", "extram1", "extram4"),
+        "console.padType" to setOf("standard", "3d"),
         "console.language" to setOf("english", "german", "french", "spanish", "italian", "japanese"),
         "display.aspectRatio" to setOf("4:3", "16:9", "Stretch"),
         "display.deinterlacer" to setOf("weave", "bob", "bob_offset", "blend"),

@@ -6,6 +6,7 @@ import com.kira3.ametrine.data.BackupRepository
 import com.kira3.ametrine.data.GeminiHistoryRepository
 import com.kira3.ametrine.data.SaveStateRepository
 import com.kira3.ametrine.data.BiosRepository
+import com.kira3.ametrine.data.CartRomRepository
 import com.kira3.ametrine.data.CheatRepository
 import com.kira3.ametrine.data.MacroRepository
 import com.kira3.ametrine.data.PadLayoutRepository
@@ -29,6 +30,7 @@ class AppContainer(context: Context) {
     val emulatorCore: EmulatorCore by lazy { EmulatorCore(appContext) }
     val appPreferences: AppPreferences by lazy { AppPreferences(appContext) }
     val biosRepository: BiosRepository by lazy { BiosRepository(appContext, emulatorCore) }
+    val cartRomRepository: CartRomRepository by lazy { CartRomRepository(appContext, emulatorCore) }
     private val libraryDatabase: LibraryDatabase by lazy { LibraryDatabase.create(appContext) }
     val libraryRepository: LibraryRepository by lazy {
         LibraryRepository(appContext, emulatorCore, appPreferences, libraryDatabase.gameDao(), gameRecordRepository)
