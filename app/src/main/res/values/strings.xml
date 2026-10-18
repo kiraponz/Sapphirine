@@ -420,7 +420,7 @@
     <string name="cheats_import">Import</string>
     <string name="cheats_name">Name</string>
     <string name="cheats_code">Code</string>
-    <string name="cheats_code_hint">One GameShark code per line, such as 8009C6E4 0FFF</string>
+    <string name="cheats_code_hint">One Action Replay code per line, such as 160AB9BE FFFF</string>
     <string name="cheats_bad_line">Line %1$d is not a code the core understands</string>
     <string name="cheats_save">Save</string>
     <string name="cheats_delete">Delete</string>

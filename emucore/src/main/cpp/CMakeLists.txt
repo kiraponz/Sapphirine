@@ -269,6 +269,7 @@ add_library(emucore SHARED
 	disc.cpp
 	driver_stubs.cpp
 	jni.cpp
+	png_writer.cpp
 	${mednafen_sources}
 )
 
@@ -344,5 +345,5 @@ target_link_libraries(emucore PRIVATE log z m android aaudio)
 
 # Our own files are C++17 (Mednafen itself stays at the gnu++11 configure.ac asks for); the
 # later -std on the command line wins over CMAKE_CXX_STANDARD's.
-set_source_files_properties(android_host.cpp audio_stream.cpp bios.cpp cdaccess_chd.cpp disc.cpp driver_stubs.cpp jni.cpp
+set_source_files_properties(android_host.cpp audio_stream.cpp bios.cpp cdaccess_chd.cpp disc.cpp driver_stubs.cpp jni.cpp png_writer.cpp
 	PROPERTIES COMPILE_OPTIONS "-std=gnu++17")

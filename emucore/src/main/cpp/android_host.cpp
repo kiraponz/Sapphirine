@@ -10,6 +10,8 @@
 #include <mednafen/mempatcher.h>
 #include <mednafen/movie.h>
 #include <mednafen/state_rewind.h>
+#include <mednafen/state.h>
+#include <mednafen/MemoryStream.h>
 #include <mednafen/hash/md5.h>
 #include <mednafen/cdrom/CDInterface.h> // what ss/cdb.h's CDInterface needs
 #include <mednafen/ss/ss.h>             // the MDFN_IEN_SS namespace and sscpu_timestamp_t
@@ -19,6 +21,7 @@
 #include "audio_stream.h"
 #include "bios.h"
 #include "disc.h"
+#include "png_writer.h"
 
 #include <android/log.h>
 #include <android/native_window.h>
@@ -28,20 +31,29 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <dirent.h>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 // EmulatedSS is defined at global scope in src/ss/ss.cpp. mednafen.cpp declares it the same
 // way, under #ifdef WANT_SS_EMU.
 extern const Mednafen::MDFNGI EmulatedSS;
+
+// The fork exports the ss module's un-written backup RAM flag (src/ss/ss.cpp), for the app's
+// memory-card status (IsSavingMemoryCards).
+namespace MDFN_IEN_SS { bool SS_BackupRAMPending(void); }
 
 using AndroidHost::AudioStream;
 
@@ -130,6 +142,259 @@ std::unique_ptr<Mednafen::MDFN_Surface> s_surface;
 std::unique_ptr<uint32_t[]> s_surface_pixels;	// The surface's external pixel buffer.
 std::unique_ptr<int32_t[]> s_line_widths;	// espec.LineWidths, FB_HEIGHT_CAP long.
 Mednafen::EmulateSpecStruct s_espec;
+
+// ---------------------------------------------------------------------------
+// The task queue: work the other threads hand to the CPU thread (a save state or load, a
+// rewind load, the screenshot's grab), run there between the frames — next to the disc
+// changes the frame loop steps through — because Mednafen is not thread-safe. Each task
+// counts as its own small request: the poster takes it in and waits for it to have run.
+// ---------------------------------------------------------------------------
+
+struct CpuTask
+{
+	std::function<std::string()> body;	// "" for success, else why it did not work.
+	std::mutex mutex;
+	std::condition_variable cond;
+	bool done = false;
+	std::string error;			// What body returned, read through by the poster.
+};
+
+std::mutex s_task_mutex;
+std::deque<std::shared_ptr<CpuTask>> s_task_queue;
+
+// Runs [body] on the CPU thread, the poster waiting for the result: "" when it succeeded,
+// else why not. "No game is running" without going near the queue when nothing is running
+// (or has just stopped), so a poster never waits for what nothing will run.
+std::string post_cpu_task(std::function<std::string()>&& body)
+{
+	if (s_stop.load() || !s_active.load())
+		return "No game is running";
+
+	auto task = std::make_shared<CpuTask>();
+	task->body = std::move(body);
+
+	{
+		std::lock_guard<std::mutex> lock(s_task_mutex);
+		s_task_queue.push_back(task);
+	}
+
+	// The CPU thread checks the queue at every frame boundary, but waits on s_vm_cond
+	// while paused: notify for that case (and harmlessly, when not, over the pacing).
+	{
+		std::lock_guard<std::mutex> lock(s_vm_mutex);
+		s_vm_cond.notify_all();
+	}
+
+	std::unique_lock<std::mutex> wait(task->mutex);
+	task->cond.wait(wait, [&task]() { return task->done; });
+	return task->error;
+}
+
+// Whether anything is queued, for the pause wait's predicate (under s_vm_mutex).
+bool tasks_queued()
+{
+	std::lock_guard<std::mutex> lock(s_task_mutex);
+	return !s_task_queue.empty();
+}
+
+// Pops the first task of the queue and runs it, on the CPU thread, without any of the VM's
+// locks held (the poster of the next task, a pause or a stop all stay possible); takes the
+// result and lets the poster go. False with nothing queued.
+bool run_one_task()
+{
+	std::shared_ptr<CpuTask> task;
+	{
+		std::lock_guard<std::mutex> lock(s_task_mutex);
+		if (s_task_queue.empty())
+			return false;
+		task = s_task_queue.front();
+		s_task_queue.pop_front();
+	}
+
+	task->error = task->body ? task->body() : std::string("No game is running");
+
+	{
+		std::lock_guard<std::mutex> lock(task->mutex);
+		task->done = true;
+	}
+	task->cond.notify_all();
+	return true;
+}
+
+// Answers every task left queued — anything the loop will not come around to run — with
+// "No game is running": the CPU thread calls this when it leaves the frame loop (the
+// RunEndGuard, whatever way the run ended).
+void fail_queued_tasks()
+{
+	std::deque<std::shared_ptr<CpuTask>> left;
+	{
+		std::lock_guard<std::mutex> lock(s_task_mutex);
+		left.swap(s_task_queue);
+	}
+	for (const auto& task : left)
+	{
+		task->error = "No game is running";
+		{
+			std::lock_guard<std::mutex> lock(task->mutex);
+			task->done = true;
+		}
+		task->cond.notify_all();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cheats (Action Replay) and the app's picture of the main RAM. The frame loop applies the
+// cheats a frame at a time, right before MDFNI_Emulate, and the memory search's reads and
+// writes come through the queue above as AndroidHost::ReadMemory/WriteMemory. Both reach
+// the work RAM the way Mednafen's own cheat engine does — the ss module's CheatMemRead /
+// CheatMemWrite, through MDFNGameInfo->CheatInfo (git.h): the module looks the address up
+// in its physical memory map, where both work RAMs sit, keeps the SH-2 caches in step with
+// every byte it writes, and answers with the big-endian bytes the memory has.
+// ---------------------------------------------------------------------------
+
+// The app's main RAM (the memory search's offsets): the High work RAM at 0x06000000 first,
+// then the Low work RAM at 0x00200000.
+constexpr uint32_t MAIN_RAM_BYTES = 2 * 1024 * 1024;
+constexpr uint32_t WORK_RAM_HIGH_ADDRESS = 0x06000000;
+constexpr uint32_t WORK_RAM_LOW_ADDRESS = 0x00200000;
+
+// The real address of [offset] (the cheat hooks mask 27 bits, so the High RAM's echo above
+// 0x060FFFFF needs no further thought).
+inline uint32_t main_ram_saturn_address(uint32_t offset)
+{
+	return offset < MAIN_RAM_BYTES / 2
+		? WORK_RAM_HIGH_ADDRESS + offset
+		: WORK_RAM_LOW_ADDRESS + (offset - MAIN_RAM_BYTES / 2);
+}
+
+// One line of a parsed cheat code: a write of [size] (1 or 2) bytes of [value], big-endian,
+// at [address] — or, when [compare], not a write but the condition the next line stands
+// under (it runs only when the [size]-byte value at [address] is this one).
+struct CheatLine
+{
+	uint32_t address = 0;
+	uint16_t value = 0;
+	uint8_t size = 2;
+	bool compare = false;
+};
+
+// The cheats the app set (SetCheats), their lines parsed once at the call: the frame loop
+// takes the current list under the mutex as the shared pointer (a set is a pointer swap,
+// and the loop's own reference keeps it alive whatever the app does to the next one).
+std::mutex s_cheats_mutex;
+std::shared_ptr<const std::vector<CheatLine>> s_cheats =
+	std::make_shared<const std::vector<CheatLine>>();
+
+// The hex digit [c], or -1.
+int cheat_hex_digit(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	return -1;
+}
+
+// One "AAAAAAAA VVVV" line of a code into [out]; false when the core would not run it: the
+// command (the first digit) must be 1 (a 16-bit write), 3 (an 8-bit one, value "00VV") or
+// D (the condition for the next line), and the address — the other seven digits, as
+// 0x0AAAAAAA, the mask Mednafen's cheat engine puts over them — must be a work RAM one,
+// even for a 16-bit write. What the app's check (ActionReplay.check) flags does not get
+// this far; the parse leaves out what it would, so the two agree on what runs.
+bool parse_cheat_line(const std::string& line, CheatLine* out)
+{
+	if (line.size() != 8 + 1 + 4)
+		return false;
+
+	uint32_t address_field = 0, value = 0;
+	for (unsigned i = 0; i < 8; i++)
+	{
+		const int digit = cheat_hex_digit(line[i]);
+		if (digit < 0)
+			return false;
+		address_field = (address_field << 4) | (uint32_t)digit;
+	}
+
+	// The separator (the app's check leaves one), then the value.
+	if (line[8] != ' ' && line[8] != ':' && line[8] != '\t')
+		return false;
+	for (unsigned i = 9; i < 13; i++)
+	{
+		const int digit = cheat_hex_digit(line[i]);
+		if (digit < 0)
+			return false;
+		value = (value << 4) | (uint32_t)digit;
+	}
+
+	const uint32_t address = address_field & 0x0FFFFFFF;
+	const bool low = address >= 0x00200000 && address <= 0x002FFFFF;
+	const bool high = address >= 0x06000000 && address <= 0x07FFFFFF;
+	if (!low && !high)
+		return false;
+
+	switch (line[0])
+	{
+		case '1':
+			if (address & 1)	// A 16-bit write at an odd address makes no line.
+				return false;
+			*out = CheatLine{address, (uint16_t)value, 2, false};
+			return true;
+
+		case '3':
+			if (value > 0xFF)
+				return false;
+			*out = CheatLine{address, (uint16_t)value, 1, false};
+			return true;
+
+		case 'D':
+		case 'd':
+			*out = CheatLine{address, (uint16_t)value, 2, true};
+			return true;
+
+		default:
+			return false;
+	}
+}
+
+// The cheats onto the work RAM, on the CPU thread right before a frame: the writes go out
+// the ss module's own way (the cheat engine's writer, through its processor caches), and a
+// D line reads its condition whatever came before it — the line after a D one runs only
+// when the D's value was there.
+void apply_cheats()
+{
+	if (!Mednafen::MDFNGameInfo || strcmp(Mednafen::MDFNGameInfo->shortname, "ss"))
+		return;
+	const Mednafen::CheatInfoStruct& cheat = Mednafen::MDFNGameInfo->CheatInfo;
+
+	std::shared_ptr<const std::vector<CheatLine>> cheats;
+	{
+		std::lock_guard<std::mutex> lock(s_cheats_mutex);
+		cheats = s_cheats;
+	}
+
+	bool skip_next = false;
+	for (const CheatLine& line : *cheats)
+	{
+		if (line.compare)
+		{
+			// Big-endian: the address's byte on top, the one under it beneath.
+			const uint32_t held = ((uint32_t)cheat.MemRead(line.address) << 8) |
+				cheat.MemRead(line.address + 1);
+			skip_next = held != line.value;
+			continue;
+		}
+
+		if (!skip_next)
+		{
+			for (unsigned i = 0; i < line.size; i++)
+				cheat.MemWrite(line.address + i,
+					(uint8)(line.value >> (8 * (line.size - 1 - i))));
+		}
+		skip_next = false;
+	}
+}
 
 // ---------------------------------------------------------------------------
 // The sound output: the AAudio stream and the settings that steer it. The ring between the
@@ -583,6 +848,15 @@ int64_t now_ns()
 	return ts.tv_sec * 1000000000ll + ts.tv_nsec;
 }
 
+// The wall-clock millisecond, for what gets written down when (the save states' savedAtMs,
+// the rewind points' ages).
+int64_t now_wall_ms()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return ts.tv_sec * 1000ll + ts.tv_nsec / 1000000;
+}
+
 void sleep_until_ns(int64_t deadline)
 {
 	struct timespec ts;
@@ -630,10 +904,13 @@ void picture_rect(int width, int height, int* x, int* y, int* w, int* h)
 						: (height - *h) / 2;
 }
 
-// Scales the frame's DisplayRect (per-line widths when given, else DisplayRect.w) over the rect
-// [*x, *y, *w, *h] of [buf], sampling the surface with nearest neighbour and writing the alpha
-// byte up. Under s_window_mutex, on the CPU thread between frames.
-void blit_frame(ANativeWindow_Buffer* buf, int x, int y, int w, int h)
+// How blit_frame and the PNG writer sample the frame over a [w]x[h] target (always 4:3;
+// the callers ask for sizes of that shape): for each target pixel whose source line the
+// emulation drew, calls [put](target x, target y, the frame pixel as the surface's uint32
+// holds it — R in the low byte). What an undrawn line holds is the caller's to have
+// ready (the window is pre-filled black, as the PNG writer pre-fills its own buffer).
+template <class Put>
+void sample_frame(int w, int h, Put&& put)
 {
 	const Mednafen::MDFN_Rect& dr = s_espec.DisplayRect;
 	const int32_t* line_widths = s_espec.LineWidths;
@@ -656,15 +933,26 @@ void blit_frame(ANativeWindow_Buffer* buf, int x, int y, int w, int h)
 			continue;	// What the emulation left undrawn stays black.
 
 		const uint32_t* srow = spix + (size_t)sy * (size_t)pitch + dr.x;
-		uint32_t* drow = reinterpret_cast<uint32_t*>(buf->bits) + (size_t)(y + yy) * buf->stride + x;
 
 		// Each line starts at DisplayRect.x (the left border the h-overscan setting trims
 		// off, vdp2_render.cpp) and is LineWidths[y] pixels wide from there (the core's
 		// assert: DisplayRect.x + LineWidths[y] <= 704). DisplayRect.w, when LineWidths is
 		// flat (~0), is that same width.
 		for (int xx = 0; xx < w; xx++)
-			drow[xx] = srow[(int32_t)((int64_t)xx * lw / w)] | OPAQUE_BLACK;
+			put(xx, yy, srow[(int32_t)((int64_t)xx * lw / w)]);
 	}
+}
+
+// Scales the frame's DisplayRect (per-line widths when given, else DisplayRect.w) over the rect
+// [*x, *y, *w, *h] of [buf], sampling the surface with nearest neighbour and writing the alpha
+// byte up. Under s_window_mutex, on the CPU thread between frames.
+void blit_frame(ANativeWindow_Buffer* buf, int x, int y, int w, int h)
+{
+	uint32_t* base = reinterpret_cast<uint32_t*>(buf->bits) + (size_t)y * buf->stride + x;
+
+	sample_frame(w, h, [&](int xx, int yy, uint32_t pix) {
+		base[(size_t)yy * buf->stride + xx] = pix | OPAQUE_BLACK;
+	});
 }
 
 // Draws the last frame to the window, if there is one. Holds s_window_mutex, which SetWindow
@@ -933,6 +1221,337 @@ void move_old_saves(const std::string& from, const std::string& to)
 	rmdir(from.c_str());
 }
 
+// ---------------------------------------------------------------------------
+// Save states, rewind and screenshots, for the app's screens (jni.cpp). The state
+// operations run on the CPU thread as tasks (post_cpu_task; the frame loop or the pause
+// wait runs them between the frames), so Mednafen stays single-threaded all through.
+// ---------------------------------------------------------------------------
+
+// The state container ("SPST"): our own small header around Mednafen's state, which goes
+// inside unchanged — magic, u32 version (little endian throughout), i64 savedAtMs, u16
+// serial length + bytes (UTF-8, may be empty), u32 PNG length + bytes (may be none), u32
+// state length + bytes. MDFNSS_SaveSM gets no surface, so Mednafen embeds nothing and our
+// own PNG is all the thumbnail there is.
+constexpr uint8_t SPST_MAGIC[4] = { 'S', 'P', 'S', 'T' };
+constexpr uint32_t SPST_VERSION = 1;
+
+// The picture sizes the PNG writer gets (all 4:3, over the frame's own shape): the save
+// state's thumbnail, the rewind point's smaller one, and the screenshot.
+constexpr int THUMB_WIDTH = 320;
+constexpr int THUMB_HEIGHT = 240;
+constexpr int REWIND_THUMB_WIDTH = 160;
+constexpr int REWIND_THUMB_HEIGHT = 120;
+constexpr int SCREENSHOT_WIDTH = 640;
+constexpr int SCREENSHOT_HEIGHT = 480;
+
+// The running game's serial, saved with the states (SPST header); empty for the BIOS-only
+// boot. Set here on the CPU thread at the boot and read by its tasks (all on that thread).
+std::string s_save_serial;
+
+// The app's rewind settings ("Main"/Rewind*: CoreKeys.kt writes the toggle as "true"/
+// "false", the frequency as seconds, the slots as 1..20). The frame loop reads them.
+std::atomic<bool> s_rewind_enabled{false};
+std::atomic<double> s_rewind_frequency{10.0};	// Seconds of play between the points.
+std::atomic<int32_t> s_rewind_slots{6};
+
+// Frames since the last rewind point, on the CPU thread (tasks reset it with the history).
+int64_t s_rewind_frame_count = 0;
+
+// The points taken since a boot: when (wall clock, ms), the state bytes and the thumbnail.
+// Newest first, at most RewindSaveSlots of them (a point taken, or a smaller setting,
+// drops the oldest). The frame loop takes; the app reads (s_rewind_mutex).
+struct RewindEntry
+{
+	int64_t taken_ms = 0;
+	std::vector<uint8_t> state;
+	std::vector<uint8_t> png;	// The 160x120 thumbnail.
+};
+std::mutex s_rewind_mutex;
+std::vector<RewindEntry> s_rewind_points;
+uint64_t s_rewind_points_taken = 0;	// For the once-in-a-while cost log.
+
+// Mednafen's state into a std::vector, a MemoryStream and back (SaveSM throws the failures).
+void copy_state_from_stream(std::vector<uint8_t>* state)
+{
+	Mednafen::MemoryStream st;
+	Mednafen::MDFNSS_SaveSM(&st, false);
+
+	const uint8_t* bytes = st.map();
+	state->assign(bytes, bytes + st.size());
+	st.unmap();
+}
+
+// The last frame as PNG-ready RGB8 image, [width] by [height]: the shared sampling of the
+// frame (sample_frame), black where the emulation drew nothing. On the CPU thread.
+std::vector<uint8_t> frame_rgb(int width, int height)
+{
+	std::vector<uint8_t> rgb((size_t)width * height * 3, 0);	// Black to start.
+
+	sample_frame(width, height, [&](int xx, int yy, uint32_t pix) {
+		// The surface is ABGR32_8888: R is the low byte, as blit_frame's OPAQUE_BLACK
+		// tells (the alpha on top).
+		uint8_t* pixel = rgb.data() + ((size_t)yy * width + xx) * 3;
+		pixel[0] = (uint8_t)pix;
+		pixel[1] = (uint8_t)(pix >> 8);
+		pixel[2] = (uint8_t)(pix >> 16);
+	});
+
+	return rgb;
+}
+
+// The container around Mednafen's state bytes (and the thumbnail's PNG bytes beside them).
+// Little endian throughout, via Mednafen's own number packers.
+std::vector<uint8_t> assemble_spst(const std::string& serial, const std::vector<uint8_t>& png,
+	const std::vector<uint8_t>& state)
+{
+	std::vector<uint8_t> bytes;
+	bytes.resize(sizeof(SPST_MAGIC) + 4 + 8 + 2 + serial.size() + 4 + png.size() + 4 + state.size());
+
+	size_t p = 0;
+
+	memcpy(bytes.data() + p, SPST_MAGIC, sizeof(SPST_MAGIC));
+	p += sizeof(SPST_MAGIC);
+
+	MDFN_en32lsb(bytes.data() + p, SPST_VERSION);
+	p += 4;
+
+	MDFN_en64lsb(bytes.data() + p, (uint64)now_wall_ms());
+	p += 8;
+
+	MDFN_en16lsb(bytes.data() + p, (uint16)serial.size());
+	p += 2;
+	memcpy(bytes.data() + p, serial.data(), serial.size());
+	p += serial.size();
+
+	MDFN_en32lsb(bytes.data() + p, (uint32)png.size());
+	p += 4;
+	memcpy(bytes.data() + p, png.data(), png.size());
+	p += png.size();
+
+	MDFN_en32lsb(bytes.data() + p, (uint32)state.size());
+	p += 4;
+	memcpy(bytes.data() + p, state.data(), state.size());
+
+	return bytes;
+}
+
+// The saved state to [path]: the SPST container written to [path].tmp and renamed over
+// [path] (atomic — a half-written file never has the state's name). On the CPU thread (a
+// task body); "" on success, else why not.
+std::string write_spst_file(const std::string& path)
+{
+	std::vector<uint8_t> state;
+	copy_state_from_stream(&state);
+
+	// Our own thumbnail (320x240) is the container's PNG; Mednafen's state embeds nothing
+	// (MDFNSS_SaveSM gets no surface).
+	const std::vector<uint8_t> rgb = frame_rgb(THUMB_WIDTH, THUMB_HEIGHT);
+	const std::vector<uint8_t> png = AndroidHost::EncodePngRgb(THUMB_WIDTH, THUMB_HEIGHT, rgb.data());
+	const std::vector<uint8_t> bytes = assemble_spst(s_save_serial, png, state);
+
+	const std::string tmp_path = path + ".tmp";
+	FILE* file = fopen(tmp_path.c_str(), "wb");
+	if (!file)
+		return "Opening " + tmp_path + ": " + strerror(errno);
+
+	// A write or a close failing takes the temp file with it and fails the save.
+	std::string error;
+	if (fwrite(bytes.data(), 1, bytes.size(), file) != bytes.size())
+		error = strerror(errno);
+	if (error.empty() && fclose(file) != 0)
+		error = strerror(errno);
+	if (error.size())
+	{
+		const std::string message = "Writing " + tmp_path + ": " + error;
+		remove(tmp_path.c_str());
+		return message;
+	}
+
+	if (rename(tmp_path.c_str(), path.c_str()) != 0)
+	{
+		const std::string message = "Renaming " + tmp_path + ": " + strerror(errno);
+		remove(tmp_path.c_str());
+		return message;
+	}
+
+	return "";
+}
+
+// The state container at [path]: [serial] (may be empty), [png] (may be none), and — when
+// [state] is given — the Mednafen state copied out of the end of the file. False when it
+// cannot be opened, is short, or is no SPST file of a version we read. The lengths the
+// file names are checked against its size before anything is read by them.
+bool read_spst(const std::string& path, std::string* serial, std::vector<uint8_t>* png,
+	std::vector<uint8_t>* state)
+{
+	FILE* file = fopen(path.c_str(), "rb");
+	if (!file)
+		return false;
+
+	struct stat st;
+	if (fstat(fileno(file), &st) != 0)
+	{
+		fclose(file);
+		return false;
+	}
+
+	// The fields in the order assemble_spst wrote them. Every length is checked against what
+	// is left of the file before anything is read by it.
+	uint64_t left = (uint64_t)st.st_size;
+	auto take = [&](void* out, uint64_t count) {
+		if (count > left || fread(out, 1, (size_t)count, file) != count)
+			return false;
+		left -= count;
+		return true;
+	};
+
+	bool ok = false;
+	do
+	{
+		uint8_t head[4 + 4 + 8];	// Magic, version, savedAtMs (not needed here).
+		if (!take(head, sizeof(head)) || memcmp(head, SPST_MAGIC, sizeof(SPST_MAGIC)) ||
+			MDFN_de32lsb(head + 4) != SPST_VERSION)
+			break;
+
+		uint8_t len16[2];
+		if (!take(len16, sizeof(len16)))
+			break;
+		std::vector<uint8_t> serial_bytes(MDFN_de16lsb(len16));
+		if (!take(serial_bytes.data(), serial_bytes.size()))
+			break;
+
+		uint8_t len32[4];
+		if (!take(len32, sizeof(len32)))
+			break;
+		std::vector<uint8_t> png_bytes(MDFN_de32lsb(len32) <= left ? MDFN_de32lsb(len32) : 0);
+		if (png_bytes.size() != MDFN_de32lsb(len32) || !take(png_bytes.data(), png_bytes.size()))
+			break;
+
+		if (state)
+		{
+			if (!take(len32, sizeof(len32)))
+				break;
+			if (MDFN_de32lsb(len32) > left)
+				break;
+			state->resize(MDFN_de32lsb(len32));
+			if (!take(state->data(), state->size()))
+				break;
+		}
+
+		if (serial)
+			serial->assign((const char*)serial_bytes.data(), serial_bytes.size());
+		if (png)
+			*png = std::move(png_bytes);
+		ok = true;
+	} while (false);
+
+	fclose(file);
+	return ok;
+}
+
+// The Mednafen state in the SPST file at [path], loaded back into the running game
+// (MDFNSS_LoadSM; it throws with the why on a mismade file). On the CPU thread — a task
+// body, or the boot for the "finished, resumed later" restart.
+void load_state_file(const std::string& path)
+{
+	std::vector<uint8_t> state;
+	if (!read_spst(path, nullptr, nullptr, &state))
+		throw std::runtime_error("Not a Sapphirine save state: " + path);
+
+	// The bytes into a MemoryStream, at its front where Mednafen's loader takes them.
+	Mednafen::MemoryStream st;
+	st.write(state.data(), state.size());
+	st.seek(0, SEEK_SET);
+	Mednafen::MDFNSS_LoadSM(&st, false);
+}
+
+// The rewind history and its counter emptied: a boot (the points were taken about the
+// boot's own disc), and a state the user loads (their place does not exist in it). On the
+// CPU thread.
+void clear_rewind_points()
+{
+	{
+		std::lock_guard<std::mutex> lock(s_rewind_mutex);
+		s_rewind_points.clear();
+	}
+	s_rewind_frame_count = 0;
+}
+
+// The state's bytes into the history with the point's thumbnail, newest first and trimmed
+// to RewindSaveSlots. On the CPU thread, right after the frame (MDFNI_Emulate and its
+// draw); on a failure nothing is taken and the log gets the reason.
+void take_rewind_point()
+{
+	const int64_t t0 = now_ns();
+
+	try
+	{
+		RewindEntry point;
+		copy_state_from_stream(&point.state);
+		const size_t state_size = point.state.size();
+		const double save_ms = (now_ns() - t0) / 1e6;
+
+		// Our own thumbnail, smaller than a save state's (160x120).
+		const std::vector<uint8_t> rgb = frame_rgb(REWIND_THUMB_WIDTH, REWIND_THUMB_HEIGHT);
+		point.png = AndroidHost::EncodePngRgb(REWIND_THUMB_WIDTH, REWIND_THUMB_HEIGHT, rgb.data());
+		point.taken_ms = now_wall_ms();
+
+		bool log_it = false;
+		{
+			std::lock_guard<std::mutex> lock(s_rewind_mutex);
+			s_rewind_points.insert(s_rewind_points.begin(), std::move(point));
+
+			// At most as many as the setting keeps: also what a shrunken setting means
+			// for the ones already here.
+			const size_t kept = (size_t)s_rewind_slots.load(std::memory_order_relaxed);
+			if (s_rewind_points.size() > kept)
+				s_rewind_points.resize(kept);
+
+			log_it = ++s_rewind_points_taken <= 3 || s_rewind_points_taken % 20 == 0;
+		}
+
+		// The Saturn state's cost is one of the things to measure on a device
+		// (IMPLEMENTATION.md 2.2): the log gets the size and the saving time, the first
+		// few points and then one in about twenty.
+		if (log_it)
+			__android_log_print(ANDROID_LOG_INFO, LOG_TAG, "Rewind point #%llu: %u bytes, MDFNSS_SaveSM took %.2f ms",
+				(unsigned long long)s_rewind_points_taken, (unsigned)state_size, save_ms);
+	}
+	catch (const std::exception& e)
+	{
+		__android_log_print(ANDROID_LOG_WARN, LOG_TAG, "No rewind point taken: %s", e.what());
+	}
+}
+
+// Back to the rewind point [index] (the newest is 0): its state loaded, the points newer
+// than it dropped, and the frame counting of the next one starting over. On the CPU
+// thread; "" on success, else why not.
+std::string load_rewind_point(int index)
+{
+	std::vector<uint8_t> state;
+	{
+		std::lock_guard<std::mutex> lock(s_rewind_mutex);
+		if (index < 0 || (size_t)index >= s_rewind_points.size())
+			return "No rewind point " + std::to_string(index);
+
+		// The point loaded stays as the first, itself rewound to again; the bytes come
+		// along as a copy for the load (the list is the app's to read meanwhile, and the
+		// copy is a few steps under a millisecond against a multi-megabyte state).
+		state = s_rewind_points[(size_t)index].state;
+		s_rewind_points.erase(s_rewind_points.begin(), s_rewind_points.begin() + index);
+	}
+
+	// The state bytes into a MemoryStream, at its front where Mednafen's loader takes
+	// them — this is the same road a save state file goes, only without the container.
+	Mednafen::MemoryStream st;
+	st.write(state.data(), state.size());
+	st.seek(0, SEEK_SET);
+	Mednafen::MDFNSS_LoadSM(&st, false);
+
+	s_rewind_frame_count = 0;
+	return "";
+}
+
 } // namespace
 
 namespace AndroidHost
@@ -995,11 +1614,6 @@ bool Initialize(const std::string& data_dir, std::string* error)
 
 bool RunSystem(const std::string& path, const std::string& save_state, std::string* error)
 {
-	if (save_state.size())
-	{
-		*error = "Save states are not supported yet";
-		return false;
-	}
 	if (s_active.load())
 	{
 		*error = "A system is already running";
@@ -1027,6 +1641,12 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		else
 			load_bios_only();
 		// From here on the game goes down through MDFNI_CloseGame.
+
+		// The game's serial for the state headers: the same answer the app's library shows
+		// (disc.cpp's own, the first disc's of an .m3u), taken once at the boot. Not for the
+		// BIOS-only boot, which has no disc. This thread is the CPU thread, so every later
+		// user of the serial (the save states' tasks) reads it after the boot.
+		s_save_serial = path.size() ? AndroidHost::ReadDiscSerial(path) : std::string();
 		close_safe = true;
 
 		// Where the driver would connect the input devices (nothing in LoadCommonPost does
@@ -1039,6 +1659,14 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		// again now creates it.
 		s_live_settings_pending.store(false);
 		apply_core_settings(true);
+
+		// "Finished, and resumed later": the boot starts from the state file at
+		// [save_state], as the emulation it carries — the m3u's disc it was playing at
+		// comes back with its state (mednafen.cpp's MDFNDRIVE record and our drive hook).
+		// It is all on this thread (still the CPU thread; the frame loop starts in a
+		// moment), so a failure here is a failed boot like any other.
+		if (save_state.size())
+			load_state_file(save_state);
 
 		// -------------------------------------------------------------
 		// The frame loop, on this thread: pause-aware, paced to the frame
@@ -1071,6 +1699,7 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		{
 			~RunEndGuard()
 			{
+				fail_queued_tasks();	// The posters the loop does not run anymore.
 				s_audio.reset();
 				s_sound_buffer.reset();
 				reset_discs();
@@ -1082,9 +1711,11 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 
 		open_audio();
 
-		// Every boot starts with nothing held.
+		// Every boot starts with nothing held, and no rewind points (they belong to the
+		// boot and its place in the game, like the pads' buttons do).
 		for(auto& bits : s_pad_bits)
 			bits.store(0, std::memory_order_relaxed);
+		clear_rewind_points();
 
 		s_active.store(true);
 		s_stop.store(false);
@@ -1107,6 +1738,10 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 		{
 			// Paused: the sound stops before the wait, and starts again from a fresh prefill
 			// after it, so a resume neither replays stale sound nor starts on an underrun.
+			// The wait ends for the task queue too: a poster (a save state or load, a rewind
+			// load, a screenshot grab) is served right here — Mednafen all to itself, mid
+			// pause as well — and the waiting goes on, with the sound untouched; a resume
+			// is what brings it back, from a fresh prefill.
 			{
 				std::unique_lock<std::mutex> lock(s_vm_mutex);
 				if (s_paused && !s_stop.load())
@@ -1114,7 +1749,22 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 					lock.unlock();
 					pause_audio();
 					lock.lock();
-					s_vm_cond.wait(lock, []() { return s_stop.load() || !s_paused; });
+
+					while (s_paused && !s_stop.load())
+					{
+						s_vm_cond.wait(lock, []() { return s_stop.load() || !s_paused || tasks_queued(); });
+						if (s_paused && !s_stop.load())
+						{
+							// Woken for the queue: run it without any of the VM's locks
+							// (a pause or a stop land meanwhile), and wait again.
+							lock.unlock();
+							while (run_one_task())
+								;
+							lock.lock();
+						}
+					}
+
+					// A stop any way it came, or an actual resume.
 					if (!s_stop.load())
 					{
 						lock.unlock();
@@ -1151,6 +1801,17 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 			update_pad_buffers();
 			step_disc_change();
 
+			// The queue, next to the disc change work and before the frame: the posters
+			// (their save state, rewind load, screenshot grab) wait for this, and while
+			// the VM pauses the wait above deals with them itself.
+			while (run_one_task())
+				;
+
+			// The cheats write the work RAM here, so the frame starts on them: Mednafen is
+			// the CPU thread's alone (the memory search's reads and writes have just had
+			// their turn on the queue), and the module's writer keeps the caches in step.
+			apply_cheats();
+
 			const int64_t t0 = now_ns();
 			Mednafen::MDFNI_Emulate(&s_espec);
 			const int64_t t1 = now_ns();
@@ -1163,6 +1824,26 @@ bool RunSystem(const std::string& path, const std::string& save_state, std::stri
 			emu_ns_total += t1 - t0;
 
 			draw_frame();
+
+			// Rewind, when it is on: every RewindFrequency seconds of emulated time (the
+			// frames counted at the pacing's own rate — the game's, and a slow one's time
+			// still is what it emulates), a point off the last frame. Not while paused
+			// (the loop does not run a frame there) and not in the middle of a disc
+			// change — Mednafen's own state_rewind stays out of it.
+			if (s_rewind_enabled.load(std::memory_order_relaxed))
+			{
+				s_rewind_frame_count++;
+				if (!s_disc_changing)
+				{
+					const int64_t interval = std::max<int64_t>(1,
+						(int64_t)(s_rewind_frequency.load(std::memory_order_relaxed) * rate));
+					if (s_rewind_frame_count >= interval)
+					{
+						s_rewind_frame_count = 0;
+						take_rewind_point();
+					}
+				}
+			}
 
 			// Pace against an absolute deadline, so a late frame does not push the next one.
 			// If a whole frame or more was lost (a surface swap, a hiccup), jump the deadline
@@ -1327,6 +2008,13 @@ void SetSetting(const char* section, const char* key, const char* value)
 	{
 		if (!strcmp(key, "FastForwardSpeed"))
 			s_fast_forward_speed.store(std::clamp(atoi(value), 0, 10), std::memory_order_relaxed);
+		else if (!strcmp(key, "RewindEnable"))
+			s_rewind_enabled.store(!strcmp(value, "true") || !strcmp(value, "1") || atoi(value) != 0,
+				std::memory_order_relaxed);
+		else if (!strcmp(key, "RewindFrequency"))
+			s_rewind_frequency.store(std::clamp(atof(value), 0.1, 60.0), std::memory_order_relaxed);
+		else if (!strcmp(key, "RewindSaveSlots"))
+			s_rewind_slots.store(std::clamp(atoi(value), 1, 20), std::memory_order_relaxed);
 		return;
 	}
 
@@ -1557,6 +2245,239 @@ float GetFps()
 	return (float)s_fps.load() / 65536.0f;
 }
 
+std::string SaveState(const std::string& path)
+{
+	// The container write on the CPU thread, the poster waiting (post_cpu_task): the state
+	// is Mednafen's to give between two frames. The rewind history is untouched by it.
+	return post_cpu_task([&path]() -> std::string {
+		try
+		{
+			return write_spst_file(path);
+		}
+		catch (const std::exception& e)
+		{
+			return e.what();
+		}
+	});
+}
+
+std::string LoadState(const std::string& path)
+{
+	// The load as a task too. A state the user picks belongs to the game requested, so the
+	// disc it was playing at is the one that comes back with its mednafen-side media
+	// record; the player's rewind history goes, with the state that made it.
+	return post_cpu_task([&path]() -> std::string {
+		try
+		{
+			load_state_file(path);
+			clear_rewind_points();
+			return "";
+		}
+		catch (const std::exception& e)
+		{
+			return e.what();
+		}
+	});
+}
+
+bool GetSaveStateInfo(const std::string& path, SaveStateInfo* info)
+{
+	// The file's head — up to the thumbnail, none of the state itself — at the calling
+	// thread's own pace (plain file in the app's folders).
+	return read_spst(path, &info->serial, &info->png, nullptr);
+}
+
+void GetRewindPoints(std::vector<RewindPoint>* points)
+{
+	const int64_t now = now_wall_ms();
+	std::lock_guard<std::mutex> lock(s_rewind_mutex);
+
+	points->clear();
+	points->reserve(s_rewind_points.size());
+	for (const RewindEntry& point : s_rewind_points)
+	{
+		RewindPoint listed;
+		listed.age_ms = now > point.taken_ms ? now - point.taken_ms : 0;
+		listed.png = point.png;
+		points->push_back(std::move(listed));
+	}
+}
+
+bool LoadRewindPoint(int index)
+{
+	// The load as a task (as the app's other state work); the result's "" is a "went fine".
+	return post_cpu_task([index]() -> std::string {
+		try
+		{
+			return load_rewind_point(index);
+		}
+		catch (const std::exception& e)
+		{
+			return e.what();
+		}
+	}).empty();
+}
+
+void SaveScreenshot(const std::string& path)
+{
+	// The frame data belongs to the CPU thread, so a task grabs the pixels at its next
+	// frame boundary — that the very same way when the VM is paused, for the queue runs
+	// there. Nothing happens with no game (the question comes back answered "No game is
+	// running"), and the caller is given back right after the grab: the encode and the
+	// file write take a thread of the core's own.
+	std::vector<uint8_t> rgb;
+	const std::string error = post_cpu_task([&rgb]() -> std::string {
+		try
+		{
+			rgb = frame_rgb(SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT);
+		}
+		catch (const std::exception& e)
+		{
+			__android_log_print(ANDROID_LOG_WARN, LOG_TAG, "Screenshot: %s", e.what());
+			return e.what();
+		}
+		return "";
+	});
+	(void)error;
+
+	if (rgb.empty())
+		return;
+
+	try
+	{
+		std::thread([path, rgb = std::move(rgb)]()
+		{
+			try
+			{
+				const std::vector<uint8_t> png =
+					EncodePngRgb(SCREENSHOT_WIDTH, SCREENSHOT_HEIGHT, rgb.data());
+
+				FILE* file = fopen(path.c_str(), "wb");
+				if (!file)
+					throw std::runtime_error(std::string("Opening: ") + strerror(errno));
+
+				const size_t written = fwrite(png.data(), 1, png.size(), file);
+				const int closed = fclose(file);
+				if (written != png.size() || closed != 0)
+					throw std::runtime_error(std::string("Writing: ") + strerror(errno));
+			}
+			catch (const std::exception& e)
+			{
+				__android_log_print(ANDROID_LOG_WARN, LOG_TAG, "Screenshot to %s: %s", path.c_str(), e.what());
+			}
+		}).detach();
+	}
+	catch (const std::exception& e)
+	{
+		// No thread to be had (a system at its memory limits, say): logged, and the picture
+		// goes nowhere.
+		__android_log_print(ANDROID_LOG_WARN, LOG_TAG, "Screenshot thread: %s", e.what());
+	}
+}
+
+bool IsSavingMemoryCards()
+{
+	// The fork exports the ss module's own flag (its backup RAM holds changes not written
+	// to its file yet); only a loaded game of its kind has one to ask about.
+	if (!Mednafen::MDFNGameInfo || strcmp(Mednafen::MDFNGameInfo->shortname, "ss"))
+		return false;
+
+	return MDFN_IEN_SS::SS_BackupRAMPending();
+}
+
+void SetCheats(const std::vector<std::string>& codes)
+{
+	std::vector<CheatLine> lines;
+	for (const std::string& code : codes)
+	{
+		// The codes come as the lines the app's check normalized ("AAAAAAAA VVVV"); blanks
+		// and comments change nothing here, and anything else parses to nothing.
+		size_t start = 0;
+		while (start < code.size())
+		{
+			const size_t end = code.find('\n', start);
+
+			const std::string raw = end == std::string::npos
+				? code.substr(start) : code.substr(start, end - start);
+			const size_t a = raw.find_first_not_of(" \t\r");
+			const std::string line = a == std::string::npos ? std::string()
+				: raw.substr(a, raw.find_last_not_of(" \t\r") - a + 1);
+
+			CheatLine op;
+			if (parse_cheat_line(line, &op))
+				lines.push_back(op);
+
+			if (end == std::string::npos)
+				break;
+			start = end + 1;
+		}
+	}
+
+	auto next = std::make_shared<const std::vector<CheatLine>>(std::move(lines));
+	{
+		std::lock_guard<std::mutex> lock(s_cheats_mutex);
+		s_cheats = next;
+	}
+	__android_log_print(ANDROID_LOG_INFO, LOG_TAG, "Cheats: %zu lines accepted", next->size());
+}
+
+bool ReadMemory(uint32_t offset, uint32_t length, std::vector<uint8_t>* bytes)
+{
+	if (offset > MAIN_RAM_BYTES || length > MAIN_RAM_BYTES - offset)
+		return false;
+
+	// The reads (and the writes below) are tasks of the CPU thread like the state ones:
+	// the cheat engine they go through belongs to it. The answer is the caller's bytes.
+	return post_cpu_task([&offset, &length, bytes]() -> std::string {
+		if (!Mednafen::MDFNGameInfo || strcmp(Mednafen::MDFNGameInfo->shortname, "ss"))
+			return "No game is running";
+
+		try
+		{
+			const auto read = Mednafen::MDFNGameInfo->CheatInfo.MemRead;
+			bytes->resize(length);
+			for (uint32_t i = 0; i < length; i++)
+				(*bytes)[i] = read(main_ram_saturn_address(offset + i));
+			return "";
+		}
+		catch (const std::exception& e)
+		{
+			return e.what();
+		}
+	}).empty();
+}
+
+bool WriteMemory(uint32_t offset, uint32_t size, uint32_t value)
+{
+	// A 2/4-byte write stands on an aligned address (a byte has no such care); the offsets
+	// keep the parity of the work-RAM addresses they name, so the check is on the offset.
+	if (size != 1 && size != 2 && size != 4)
+		return false;
+	if ((size == 2 && (offset & 1)) || (size == 4 && (offset & 3)) ||
+		size > MAIN_RAM_BYTES || offset > MAIN_RAM_BYTES - size)
+		return false;
+
+	return post_cpu_task([&offset, &size, &value]() -> std::string {
+		if (!Mednafen::MDFNGameInfo || strcmp(Mednafen::MDFNGameInfo->shortname, "ss"))
+			return "No game is running";
+
+		try
+		{
+			const auto write = Mednafen::MDFNGameInfo->CheatInfo.MemWrite;
+			// Big-endian, a byte at a time (the writer keeps the caches in step with every
+			// one), so a write over the High RAM's end into the Low comes out right too.
+			for (uint32_t i = 0; i < size; i++)
+				write(main_ram_saturn_address(offset + i),
+					(uint8)(value >> (8 * (size - 1 - i))));
+			return "";
+		}
+		catch (const std::exception& e)
+		{
+			return e.what();
+		}
+	}).empty();
+}
+
 } // namespace AndroidHost
 
 namespace Mednafen
@@ -1574,6 +2495,23 @@ void MDFND_MidSync(EmulateSpecStruct* espec, const unsigned flags)
 	// during the frame reaches the game this frame rather than the next.
 	if(flags & MIDSYNC_FLAG_UPDATE_INPUT)
 		update_pad_buffers();
+}
+
+// What the drive holds now: the boot's tray closing on its first disc, the disc changes,
+// and — what reads the disc list in step with the state — a save state's own media record
+// (mednafen.cpp's MDFNDRIVE section, applied while its state loads) naming the m3u disc
+// that was in the drive when the state was made. With the tray closed, [media_idx] is the
+// disc list's slot; an open tray says nothing about a disc yet (a disc change in progress
+// has its slot booked ahead).
+void MDFND_MediaSetNotification(uint32 drive_idx, uint32 state_idx, uint32 media_idx, uint32 orientation_idx)
+{
+	(void)orientation_idx;
+
+	if (drive_idx != 0 || state_idx != DRIVE_TRAY_CLOSED)
+		return;
+
+	std::lock_guard<std::mutex> lock(s_disc_mutex);
+	s_disc_current = (int)media_idx;
 }
 
 } // namespace Mednafen

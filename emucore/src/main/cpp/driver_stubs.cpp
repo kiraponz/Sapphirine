@@ -82,10 +82,6 @@ bool MDFND_CheckNeedExit(void)
 	return false;
 }
 
-void MDFND_MediaSetNotification(uint32 drive_idx, uint32 state_idx, uint32 media_idx, uint32 orientation_idx)
-{
-}
-
 void MDFND_SetStateStatus(StateStatusStruct* status) noexcept
 {
 }

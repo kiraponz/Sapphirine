@@ -9,8 +9,10 @@ import kotlinx.coroutines.withContext
 
 /**
  * Finds where the game keeps a number: scan main RAM for a value, let the game change it, scan the
- * survivors again. Values are unsigned, little-endian, and sit at addresses that are multiples of
- * their size. Addresses are EE addresses (0 to 32 MB).
+ * survivors again. Values are unsigned and big-endian (the Saturn has its numbers that way round),
+ * and sit at offsets into the app's main RAM that are multiples of their size. The addresses it
+ * shows are the real Saturn work-RAM addresses ([EmulatorCore.offsetToSaturnAddress]); the offsets
+ * stay inside.
  */
 class MemorySearch(private val core: EmulatorCore) {
     enum class Mode { Exact, Changed, Unchanged, Increased, Decreased }
@@ -165,7 +167,7 @@ class MemorySearch(private val core: EmulatorCore) {
 
     private fun ByteArray.read(at: Int, size: Int): Long {
         var v = 0L
-        for (i in size - 1 downTo 0) v = (v shl 8) or (this[at + i].toLong() and 0xFF)
+        for (i in 0 until size) v = (v shl 8) or (this[at + i].toLong() and 0xFF)
         return v
     }
 

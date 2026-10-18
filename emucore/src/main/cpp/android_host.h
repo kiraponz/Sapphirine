@@ -23,8 +23,8 @@ bool Initialize(const std::string& data_dir, std::string* error);
 
 // Boots the disc image at [path] (a /saf/ path or a file: .chd, .ccd, .cue or .toc; empty = the
 // BIOS alone, no disc) on the calling thread, which becomes the CPU thread, and runs it until
-// the VM shuts down. False, with a reason in [error], when it did not
-// boot. Save states are not part of this yet.
+// the VM shuts down. False, with a reason in [error], when it did not boot. A non-empty
+// [save_state] restarts the (loaded) game from that state file after the boot.
 bool RunSystem(const std::string& path, const std::string& save_state, std::string* error);
 
 // True from the moment the VM booted until it is destroyed.
@@ -97,6 +97,82 @@ bool InsertDisc(const std::string& path);
 // The last error notice Mednafen gave (MDFND_OutputNotice, driver_stubs.cpp) since the previous
 // call, or "". Its loaders report failures this way instead of throwing.
 std::string TakeCoreErrorNotice();
+
+// ---------------------------------------------------------------------------
+// Save states, rewind, screenshots and the memory-card status. The state operations
+// (SaveState, LoadState, LoadRewindPoint, the grab in SaveScreenshot) run on the CPU
+// thread between the frames — Mednafen is not thread-safe — with the caller waiting;
+// while the VM is paused, they run there too. When no game is running (or the run ends
+// first), they answer "No game is running" instead of waiting.
+// ---------------------------------------------------------------------------
+
+// Saves the running game to [path], as the state container android_host.cpp describes, and
+// clears nothing else. "" when it succeeded, else why not. Blocks (CPU thread).
+std::string SaveState(const std::string& path);
+
+// Loads the state at [path] into the running game and clears the rewind history: the game's
+// disc-in-drive of an .m3u comes back with the state, through Mednafen's own media record.
+// "" when it succeeded, else why not. Blocks (CPU thread).
+std::string LoadState(const std::string& path);
+
+struct SaveStateInfo
+{
+	std::string serial;		// Of the state's game; "" when it was the BIOS alone.
+	std::vector<uint8_t> png;	// The thumbnail, empty when the file has none.
+};
+
+// The serial and thumbnail from the header of the state file at [path], none of the state
+// itself; false when it is not one the core can read. Any thread; blocking file I/O.
+bool GetSaveStateInfo(const std::string& path, SaveStateInfo* info);
+
+// One rewind point as GetRewindPoints reads it.
+struct RewindPoint
+{
+	int64_t age_ms = 0;		// How long ago (wall clock) it was taken.
+	std::vector<uint8_t> png;	// The 160x120 thumbnail.
+};
+
+// The rewind points, newest first. Any thread.
+void GetRewindPoints(std::vector<RewindPoint>* points);
+
+// Goes back to the rewind point [index] (as GetRewindPoints lists it) and drops the points
+// newer than it. False out of range. Blocks (CPU thread).
+bool LoadRewindPoint(int index);
+
+// Captures the last frame from the CPU thread, then encodes it as a PNG and writes it to
+// [path] on a thread of the core's own (the caller is not blocked for the encode). Nothing
+// happens with no game. Failures are logged.
+void SaveScreenshot(const std::string& path);
+
+// True while the running game's (ss module's) backup RAM has changes waiting to be written
+// to its file — a state would race them — false otherwise or without a game. Any thread.
+bool IsSavingMemoryCards();
+
+// ---------------------------------------------------------------------------
+// Cheats (Action Replay) and the main-RAM access of the memory search. Both reach the work
+// RAM the way Mednafen's cheat engine does — through MDFNGameInfo->CheatInfo's MemRead and
+// MemWrite, the ss module's readers and writers over its own physical memory map (ss.cpp),
+// where both work RAMs sit; MemWrite also checks the map's write permission and keeps the
+// SH-2 caches in step. Without a game they answer false, and the reads and writes run on
+// the CPU thread between the frames, with the caller waiting (LoadState's way).
+// ---------------------------------------------------------------------------
+
+// The cheats of the game the codes belong to: their lines parsed once and applied by the frame
+// loop before every frame, until SetCheats comes again or the process ends. Lines the core would
+// not understand are left out. Any thread.
+void SetCheats(const std::vector<std::string>& codes);
+
+// [length] bytes of the app's main RAM (EmulatorCore.MAIN_RAM_BYTES: 2 MB, the High work RAM at
+// 0x06000000 first, then the Low work RAM at 0x00200000; [offset] into it), as the big-endian
+// bytes the Saturn's memory has. False with no game, or when [offset] and [length] do not fit.
+// Blocks (CPU thread).
+bool ReadMemory(uint32_t offset, uint32_t length, std::vector<uint8_t>* bytes);
+
+// Writes the [size] (1, 2 or 4) big-endian bytes of [value] at [offset] of main RAM (see
+// ReadMemory). False with no game, a [size] that is none of those, when it does not fit, or
+// when a 2/4-byte write stands at an odd address (byte writes have no such care). Blocks
+// (CPU thread).
+bool WriteMemory(uint32_t offset, uint32_t size, uint32_t value);
 
 uint32_t GetFrameNumber();
 float GetFps();

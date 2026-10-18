@@ -48,7 +48,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kira3.ametrine.R
 import com.kira3.ametrine.emucore.Cheat
-import com.kira3.ametrine.emucore.GameShark
+import com.kira3.ametrine.emucore.ActionReplay
 
 /** A game's cheats: switch them on and off, add and edit codes, import a cheat file or the cheat database's codes. */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
@@ -140,7 +140,7 @@ fun CheatsScreen(
                         Switch(checked = cheat.enabled, onCheckedChange = { viewModel.setEnabled(cheat.id, it) })
                     },
                     supportingContent = {
-                        val lines = GameShark.check(cheat.code).lines.size
+                        val lines = ActionReplay.check(cheat.code).lines.size
                         Text(pluralStringResource(R.plurals.cheats_code_lines, lines, lines))
                     },
                 ) { Text(cheat.name, maxLines = 1) }
@@ -181,7 +181,7 @@ private const val NEW = "new"
 private fun CheatDialog(cheat: Cheat?, onSave: (name: String, code: String) -> Unit, onDelete: (() -> Unit)?, onDismiss: () -> Unit) {
     var name by rememberSaveable { mutableStateOf(cheat?.name.orEmpty()) }
     var code by rememberSaveable { mutableStateOf(cheat?.code.orEmpty()) }
-    val check = GameShark.check(code)
+    val check = ActionReplay.check(code)
     val canSave = name.isNotBlank() && code.isNotBlank() && check.badLine == null && check.lines.isNotEmpty()
     AlertDialog(
         onDismissRequest = onDismiss,

@@ -8,9 +8,9 @@ import android.view.Surface
  * 1.32.1's "ss" module). Native code finds this class by name to call the callbacks at the
  * bottom, so its name and members must not change (consumer-rules.pro keeps them).
  *
- * The methods this step of the port does not have yet (save states, rewind, cheats, ...)
- * still answer with their "not available" values, so the frontend screens keep working until
- * they are wired up.
+ * The methods this step of the port does not have yet (the 3D Control Pad's stick, cheat files and
+ * the cheat database, the disc-set GameDB) still answer with their "not available" values, so the
+ * frontend screens keep working until they are wired up.
  *
  * Use [EmulatorCore] instead of calling this directly.
  */
@@ -117,34 +117,33 @@ internal object NativeCore {
     /** Puts the disc image at [path] in the drive in place of the disc there, the same way. Blocking I/O. */
     @JvmStatic external fun insertDisc(path: String): Boolean
 
+    // ---- States and screenshots ----
+
+    /** Saves the running game to [path]. Blocks. Null when it did, or why not. */
+    @JvmStatic external fun saveState(path: String): String?
+
+    /** Loads the state at [path] into the running game. Blocks. Null when it did, or why not. */
+    @JvmStatic external fun loadState(path: String): String?
+
+    /** True while a memory card is waiting to be written, which refuses a save state. */
+    @JvmStatic external fun isSavingMemoryCards(): Boolean
+
+    /** [serial, PNG screenshot or null] from the header of the state at [path]; null if it is not a state. */
+    @JvmStatic external fun getSaveStateInfo(path: String): Array<Any?>?
+
+    /** [ages in ms (LongArray), PNG thumbnails (Array<ByteArray?>)] of the rewind points, newest first. */
+    @JvmStatic external fun getRewindPoints(): Array<Any>
+
+    /** Goes back to the rewind point [index] (in [getRewindPoints]). Blocks. */
+    @JvmStatic external fun loadRewindPoint(index: Int): Boolean
+
+    /** Writes what is on screen to [path] as a PNG, on a thread of the core's own. */
+    @JvmStatic external fun saveScreenshot(path: String)
+
     // ---- Not available yet: these keep the frontend compiling until their task comes up ----
 
     /** Moves the left or [right] stick of the pad in [port] to ([x], [y]), each -1..1 with +y down. Not used until the 3D Control Pad. */
     @JvmStatic fun setPadStick(port: Int, right: Boolean, x: Float, y: Float) = Unit
-
-    /** Saves the running game to [path]. Blocks. Null when it did, or why not. */
-    @JvmStatic fun saveState(path: String): String? = "Not available yet"
-
-    /** Loads the state at [path] into the running game. Blocks. Null when it did, or why not. */
-    @JvmStatic fun loadState(path: String): String? = "Not available yet"
-
-    /** True while a memory card is waiting to be written, which refuses a save state. */
-    @JvmStatic fun isSavingMemoryCards(): Boolean = false
-
-    /** [serial, PNG screenshot or null] from the header of the state at [path]; null if it is not a state. */
-    @JvmStatic fun getSaveStateInfo(path: String): Array<Any?>? = null
-
-    /** [ages in ms (LongArray), PNG thumbnails (Array<ByteArray?>)] of the rewind points, newest first. */
-    @JvmStatic fun getRewindPoints(): Array<Any> = arrayOf(LongArray(0), emptyArray<ByteArray?>())
-
-    /** Goes back to the rewind point [index] (in [getRewindPoints]). Blocks. */
-    @JvmStatic fun loadRewindPoint(index: Int): Boolean = false
-
-    /** Writes what is on screen to [path] as a PNG, on a thread of the core's own. */
-    @JvmStatic fun saveScreenshot(path: String) = Unit
-
-    /** The cheats to run in every game from now on: [names] with their code lines in [codes]. */
-    @JvmStatic fun setCheats(names: Array<String>, codes: Array<String>) = Unit
 
     /** Alternating names and code lines of the cheats in a cheat file's [text]; null if it has none. */
     @JvmStatic fun parseCheats(text: String): Array<String>? = null
@@ -152,17 +151,32 @@ internal object NativeCore {
     /** Alternating names and code lines of the cheat database's cheats for [serial]; null if it has none. Needs [initialize]. */
     @JvmStatic fun getDatabaseCheats(serial: String): Array<String>? = null
 
-    /** [length] bytes of main RAM from [address]; null with no game or out of range. Blocks. */
-    @JvmStatic fun readMemory(address: Int, length: Int): ByteArray? = null
-
-    /** Writes [value] as [size] (1, 2 or 4) bytes at [address] of main RAM. Blocks. */
-    @JvmStatic fun writeMemory(address: Int, size: Int, value: Int): Boolean = false
-
     /** The disc set's name, then the serials of its discs in disc order, for [serial]'s game in the GameDB; null when it lists no set. */
     @JvmStatic fun getDiscSet(serial: String): Array<String>? = null
 
     /** The GameDB's title for [serial], or null. */
     @JvmStatic fun getGameDbTitle(serial: String): String? = null
+
+    // ---- Cheats ----
+
+    /** The cheats to run in every game from now on: [names] with their code lines in [codes]. Lines the core doesn't take are left out. */
+    @JvmStatic external fun setCheats(names: Array<String>, codes: Array<String>)
+
+    // ---- Memory search ----
+
+    /**
+     * [length] bytes of main RAM from [address] (an offset into [EmulatorCore.MAIN_RAM_BYTES], as
+     * the memory is laid out for the app: the High work RAM first, then the Low), big-endian. Null
+     * with no game or when it does not fit. Blocks until the core is between frames.
+     */
+    @JvmStatic external fun readMemory(address: Int, length: Int): ByteArray?
+
+    /**
+     * Writes [value] as [size] (1, 2 or 4) big-endian bytes at [address] of main RAM (an offset, see
+     * [readMemory]). False with no game, out of range, or when [size] is none of those (or a 2/4-byte
+     * write stands at an odd address). Blocks until the core is between frames.
+     */
+    @JvmStatic external fun writeMemory(address: Int, size: Int, value: Int): Boolean
 
     /**
      * "<region>\t<description>" for a Saturn BIOS image, or null if it is none. The region is

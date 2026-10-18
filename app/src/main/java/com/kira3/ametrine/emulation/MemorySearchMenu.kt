@@ -56,6 +56,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.kira3.ametrine.R
+import com.kira3.ametrine.emucore.EmulatorCore
 import com.kira3.ametrine.emulation.search.MemorySearch
 import com.kira3.ametrine.emulation.search.MemorySearch.Mode
 import kotlinx.coroutines.delay
@@ -240,7 +241,7 @@ fun MemorySearchMenu(search: MemorySearch, editable: Boolean, onClose: () -> Uni
                             Spacer(Modifier.width(16.dp))
                         }
                         Text(
-                            "%08X".format(hit.address),
+                            saturnAddress(hit.address),
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodyLarge,
                             modifier = Modifier.weight(1f),
@@ -275,7 +276,8 @@ private fun EditValueDialog(search: MemorySearch, hits: List<MemorySearch.Hit>, 
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    if (hits.size == 1) "%08X".format(hits[0].address) else stringResource(R.string.search_edit_many, hits.size),
+                    if (hits.size == 1) saturnAddress(hits[0].address)
+                    else stringResource(R.string.search_edit_many, hits.size),
                     fontFamily = FontFamily.Monospace,
                 )
                 OutlinedTextField(
@@ -330,8 +332,11 @@ private fun modeLabel(mode: Mode) = when (mode) {
     Mode.Decreased -> R.string.search_mode_decreased
 }
 
+/** The hit's offset and its real Saturn address (the memory search keeps offsets inside), as hex. */
+private fun saturnAddress(offset: Int) = "%08X".format(EmulatorCore.offsetToSaturnAddress(offset))
+
 private fun copyAddress(context: Context, address: Int) {
-    val text = "%08X".format(address)
+    val text = saturnAddress(address)
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     clipboard.setPrimaryClip(ClipData.newPlainText("address", text))
     Toast.makeText(context, context.getString(R.string.search_copied, text), Toast.LENGTH_SHORT).show()

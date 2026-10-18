@@ -216,18 +216,19 @@ class EmulatorCore(context: Context) {
 
     /**
      * The cheats to run: the [Cheat.enabled] ones of [cheats] go into the running game now, and into
-     * every game booted after it. Codes the core doesn't understand are skipped.
+     * every game booted after it. Lines the core doesn't understand (ActionReplay.check flags the
+     * first one) are left out.
      */
     fun setCheats(cheats: List<Cheat>) {
         val enabled = cheats.filter { it.enabled }
-            .map { it.name to GameShark.check(it.code).lines.joinToString("\n") }
+            .map { it.name to ActionReplay.check(it.code).lines.joinToString("\n") }
             .filter { it.second.isNotEmpty() }
         NativeCore.setCheats(enabled.map { it.first }.toTypedArray(), enabled.map { it.second }.toTypedArray())
     }
 
     /**
-     * The cheats in a cheat file's [text] (the PCSXR, libretro and ePSXe formats), all off, each
-     * with an id from [newId]. Empty if it has none.
+     * The cheats in a cheat file's [text], all off, each with an id from [newId]. Empty if it has
+     * none; the core reads no cheat file format for the Saturn yet.
      */
     fun parseCheatFile(text: String, newId: () -> String): List<Cheat> =
         NativeCore.parseCheats(text).toCheats(newId)
@@ -446,21 +447,25 @@ class EmulatorCore(context: Context) {
     /** Why the custom driver set by [useVulkanDriver] did not open, once the VM is up; null if it did or none was set. */
     val customDriverFailure: String? get() = null
 
-    /** The unsigned little-endian number of [size] (1, 2 or 4) bytes at [address], or null if it cannot be read. */
+    /**
+     * The unsigned big-endian number of [size] (1, 2 or 4) bytes at [address], or null if it cannot
+     * be read.
+     */
     fun readValue(address: Int, size: Int): Long? {
         val bytes = readMemory(address, size) ?: return null
         var v = 0L
-        for (i in size - 1 downTo 0) v = (v shl 8) or (bytes[i].toLong() and 0xFF)
+        for (i in 0 until size) v = (v shl 8) or (bytes[i].toLong() and 0xFF)
         return v
     }
 
     /**
      * [length] bytes of main RAM from [address], or null with no game or out of range. Blocks for up
-     * to a frame, until the core is between frames.
+     * to a frame, until the core is between frames. The [address] is an offset into
+     * [MAIN_RAM_BYTES], and the bytes are the big-endian order the Saturn's memory has.
      */
     fun readMemory(address: Int, length: Int): ByteArray? = NativeCore.readMemory(address, length)
 
-    /** Writes [value] as [size] (1, 2 or 4) little-endian bytes at [address]. False with no game or out of range. */
+    /** Writes [value] as [size] (1, 2 or 4) big-endian bytes at [address]. False with no game or out of range. */
     fun writeValue(address: Int, size: Int, value: Long): Boolean =
         size in setOf(1, 2, 4) && NativeCore.writeMemory(address, size, value.toInt())
 
@@ -527,10 +532,34 @@ class EmulatorCore(context: Context) {
 
     companion object {
         /**
-         * Size of the main RAM the memory search covers. With the 8 MB RAM setting, [readMemory]
-         * reaches further, but games made for the PS1 only use the first 2 MB.
+         * Size of the main RAM the memory search and the cheats cover, as the app lays it out:
+         * 2 MB, the Saturn's High work RAM (0x06000000..0x060FFFFF) first, then its Low work RAM
+         * (0x00200000..0x002FFFFF). [readMemory] and [writeMemory] take offsets into this.
          */
         const val MAIN_RAM_BYTES = 2 * 1024 * 1024
+
+        /**
+         * The real Saturn address [offset] (into [MAIN_RAM_BYTES]) stands for, as the memory
+         * search shows it and the cheat codes name it.
+         */
+        fun offsetToSaturnAddress(offset: Int): Int {
+            require(offset in 0 until MAIN_RAM_BYTES) { "Offset is outside the main RAM" }
+            return if (offset < MAIN_RAM_HALF_BYTES) 0x06000000 + offset
+            else 0x00200000 + (offset - MAIN_RAM_HALF_BYTES)
+        }
+
+        /**
+         * The offset into [MAIN_RAM_BYTES] the real Saturn work-RAM [address] stands for, the
+         * inverse of [offsetToSaturnAddress]; -1 for an address that is not (first megabyte of)
+         * work RAM.
+         */
+        fun saturnAddressToOffset(address: Int): Int = when (address) {
+            in 0x06000000..0x060FFFFF -> address - 0x06000000
+            in 0x00200000..0x002FFFFF -> address - 0x00200000 + MAIN_RAM_HALF_BYTES
+            else -> -1
+        }
+
+        private const val MAIN_RAM_HALF_BYTES = 1024 * 1024
 
         private const val RESUME_SUFFIX = "_resume.sav"
 

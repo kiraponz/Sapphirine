@@ -227,6 +227,154 @@ extern "C" JNIEXPORT jboolean JNICALL NATIVE_CORE(insertDisc)(JNIEnv* env, jclas
 	return AndroidHost::InsertDisc(ToString(env, path)) ? JNI_TRUE : JNI_FALSE;
 }
 
+// ---- Save states, rewind, screenshots ----
+
+extern "C" JNIEXPORT jstring JNICALL NATIVE_CORE(saveState)(JNIEnv* env, jclass, jstring path)
+{
+	const std::string error = AndroidHost::SaveState(ToString(env, path));
+	return ErrorToString(env, error.empty(), error);
+}
+
+extern "C" JNIEXPORT jstring JNICALL NATIVE_CORE(loadState)(JNIEnv* env, jclass, jstring path)
+{
+	const std::string error = AndroidHost::LoadState(ToString(env, path));
+	return ErrorToString(env, error.empty(), error);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL NATIVE_CORE(isSavingMemoryCards)(JNIEnv*, jclass)
+{
+	return AndroidHost::IsSavingMemoryCards() ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL NATIVE_CORE(getSaveStateInfo)(JNIEnv* env, jclass, jstring path)
+{
+	AndroidHost::SaveStateInfo info;
+	if (!AndroidHost::GetSaveStateInfo(ToString(env, path), &info))
+		return nullptr;
+
+	// [serial, PNG screenshot or null] (NativeCore.getSaveStateInfo).
+	jclass object_class = env->FindClass("java/lang/Object");
+	jobjectArray ret = env->NewObjectArray(2, object_class, nullptr);
+	jstring serial = env->NewStringUTF(info.serial.c_str());
+	env->SetObjectArrayElement(ret, 0, serial);
+	env->DeleteLocalRef(serial);
+	if (info.png.size())
+	{
+		jbyteArray png = env->NewByteArray((jsize)info.png.size());
+		env->SetByteArrayRegion(png, 0, (jsize)info.png.size(),
+			reinterpret_cast<const jbyte*>(info.png.data()));
+		env->SetObjectArrayElement(ret, 1, png);
+		env->DeleteLocalRef(png);
+	}
+	env->DeleteLocalRef(object_class);
+	return ret;
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL NATIVE_CORE(getRewindPoints)(JNIEnv* env, jclass)
+{
+	std::vector<AndroidHost::RewindPoint> points;
+	AndroidHost::GetRewindPoints(&points);
+
+	// [ages in ms (newest first), PNG thumbnails] (NativeCore.getRewindPoints), one pair of
+	// entries per point.
+	jlongArray ages = env->NewLongArray((jsize)points.size());
+	{
+		std::vector<jlong> age_values(points.size());
+		for (size_t i = 0; i < points.size(); i++)
+			age_values[i] = points[i].age_ms;
+		env->SetLongArrayRegion(ages, 0, (jsize)age_values.size(), age_values.data());
+	}
+
+	jclass byte_array_class = env->FindClass("[B");
+	jobjectArray thumbnails = env->NewObjectArray((jsize)points.size(), byte_array_class, nullptr);
+	for (size_t i = 0; i < points.size(); i++)
+	{
+		if (!points[i].png.size())
+			continue;	// No point comes without its thumbnail; null for an odd one is fine.
+		jbyteArray png = env->NewByteArray((jsize)points[i].png.size());
+		env->SetByteArrayRegion(png, 0, (jsize)points[i].png.size(),
+			reinterpret_cast<const jbyte*>(points[i].png.data()));
+		env->SetObjectArrayElement(thumbnails, (jsize)i, png);
+		env->DeleteLocalRef(png);
+	}
+	env->DeleteLocalRef(byte_array_class);
+
+	jclass object_class = env->FindClass("java/lang/Object");
+	jobjectArray ret = env->NewObjectArray(2, object_class, nullptr);
+	env->SetObjectArrayElement(ret, 0, ages);
+	env->DeleteLocalRef(ages);
+	env->SetObjectArrayElement(ret, 1, thumbnails);
+	env->DeleteLocalRef(thumbnails);
+	env->DeleteLocalRef(object_class);
+	return ret;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL NATIVE_CORE(loadRewindPoint)(JNIEnv*, jclass, jint index)
+{
+	return AndroidHost::LoadRewindPoint(index) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(saveScreenshot)(JNIEnv* env, jclass, jstring path)
+{
+	AndroidHost::SaveScreenshot(ToString(env, path));
+}
+
+// ---- Cheats and memory search ----
+
+extern "C" JNIEXPORT void JNICALL NATIVE_CORE(setCheats)(JNIEnv* env, jclass, jobjectArray names, jobjectArray codes)
+{
+	// Only the codes shape what runs (android_host.cpp), but the names come along for it to keep.
+	std::vector<std::string> code_texts;
+	const jsize count = codes ? env->GetArrayLength(codes) : 0;
+	code_texts.reserve(count);
+	for (jsize i = 0; i < count; i++)
+	{
+		auto code = static_cast<jstring>(env->GetObjectArrayElement(codes, i));
+		code_texts.push_back(ToString(env, code));
+		env->DeleteLocalRef(code);
+	}
+
+	try
+	{
+		AndroidHost::SetCheats(code_texts);
+	}
+	catch (const std::exception& e)
+	{
+		__android_log_print(ANDROID_LOG_ERROR, "NativeCore", "setCheats: %s", e.what());
+	}
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL NATIVE_CORE(readMemory)(JNIEnv* env, jclass, jint address, jint length)
+{
+	std::vector<uint8_t> bytes;
+	try
+	{
+		if (!AndroidHost::ReadMemory((uint32_t)address, (uint32_t)length, &bytes))
+			return nullptr;
+	}
+	catch (...)
+	{
+		return nullptr;
+	}
+
+	jbyteArray ret = env->NewByteArray((jsize)bytes.size());
+	env->SetByteArrayRegion(ret, 0, (jsize)bytes.size(),
+		reinterpret_cast<const jbyte*>(bytes.data()));
+	return ret;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL NATIVE_CORE(writeMemory)(JNIEnv*, jclass, jint address, jint size, jint value)
+{
+	try
+	{
+		return AndroidHost::WriteMemory((uint32_t)address, (uint32_t)size, (uint32_t)value) ? JNI_TRUE : JNI_FALSE;
+	}
+	catch (...)
+	{
+		return JNI_FALSE;
+	}
+}
+
 // ---- BIOS ----
 
 extern "C" JNIEXPORT jstring JNICALL NATIVE_CORE(getBiosInfoFromFd)(JNIEnv* env, jclass, jint fd)
