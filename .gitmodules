@@ -1,0 +1,3 @@
+[submodule "external/sapphirine-core"]
+	path = external/sapphirine-core
+	url = https://github.com/kiraponz/sapphirine-core.git
