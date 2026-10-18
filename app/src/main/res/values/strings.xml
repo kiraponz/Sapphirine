@@ -609,7 +609,7 @@
     <string name="about_bios_note">Games need a BIOS dumped from your own console. Sapphirine does not include any BIOS or games.</string>
     <string name="about_source">Source code</string>
     <string name="about_core">Emulation core</string>
-    <string name="about_core_summary">Mednafen %1$s</string>
+    <string name="about_core_summary">Mednafen fork (%1$s)</string>
     <string name="about_license">License</string>
     <string name="about_license_summary">GNU General Public License, version 3</string>
     <string name="about_licenses">Open source licenses</string>

@@ -93,8 +93,8 @@ const val SOURCE_URL = "https://github.com/kiraponz/Sapphirine"
 /** Where the Mednafen fork the core is built from is published (see [coreSourceUrl]). */
 const val CORE_SOURCE_URL = "https://github.com/kiraponz/sapphirine-core"
 
-/** Where the core's source is kept; [version] is the Mednafen version the core is built from. */
-fun coreSourceUrl(version: String): String? = CORE_SOURCE_URL
+/** The core's source at [commit], kept so the core's source stays available. Null for an unknown commit. */
+fun coreSourceUrl(commit: String): String? = "$CORE_SOURCE_URL/tree/$commit".takeIf { commit != "unknown" }
 
 /** This app itself, for its own license from About. */
 val ametrineComponent = OpenSourceComponent(
